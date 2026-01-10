@@ -34,8 +34,11 @@ spi.cs = "PIN_17"
 # spi.tx_dma = "DMA_CH2" # omit for nrf52
 # spi.rx_dma = "DMA_CH3" # omit for nrf52
 
+# STM32 pins do not implement the Wait trait, therefore this has no effect.
+# For STM32 you could use ExitInput and configure in Rust.
 motion = "PIN_20" # Optional. If omitted, the sensor is polled.
 
+# how often the sensor sends reports to the computer
 report_hz = 125 # Optional: Report rate in Hz
 
 cpi = 1600
@@ -118,10 +121,22 @@ bind_interrupts!(struct Irqs {
 
     // Create the sensor device
     // for PMW3360
-    const POINTING_DEV_ID: u8 = 0 // this ID can be anything form 0-255. Just make sure you don't use the same number twice for different sensors. 
+    const POINTING_DEV_ID: u8 = 0 // this ID can be anything form 0-255. Just make sure you don't use the same number twice for different sensors.
     let mut PointingDevice::<Pmw33xx<_, _, _, Pmw3360Spec>>::new(POINTING_DEV_ID, spi_bus, cs, Some(motion), sensor_config);
     // for PMW3389
     let mut PointingDevice::<Pmw33xx<_, _, _, Pmw3389Spec>>::new(POINTING_DEV_ID, spi_bus, cs, Some(motion), sensor_config);
+
+// if you have an SROM for the sensor, you can upload it at startup using this:
+// let mut pmw3360_device = PointingDevice::<Pmw33xx<_, _, _, Pmw3360Spec>>::new_with_firmware_poll_interval_report_hertz(
+//     POINTING_DEV_ID,
+//     spi_bus,
+//     cs,
+//     Some(motion)
+//     sensor_config,
+//     500, // poll interval
+//     125, // report_hz
+//     crate::pmw3360srom::PMW3360_SROM, // &[u8] in static memory (const)
+// );
 ```
 
 And define a `PointingProcessor` and add it to the `run_processor_chain!` macro to process the events.
