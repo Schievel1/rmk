@@ -4,7 +4,7 @@
 
 RMK supports DFU for **RP2040** (via `dfu_rp`) and **nRF52840** (via `dfu_nrf`).
 
-[bootymcbootface](https://codeberg.org/Schievel/bootymcbootface/) is a pre-built embassy-boot bootloader for both platforms. It sits at the beginning of flash and handles the dual-slot firmware switching and rollback on boot. RMK itself provides the DFU USB interface (via `embassy-usb-dfu`) for subsequent updates, so once bootymcbootface and RMK are flashed, you never need to press BOOTSEL again.
+bootymcbootface is a pre-built embassy-boot bootloader shipped with RMK in the `bootymcbootface/` directory. It sits at the beginning of flash and handles the dual-slot firmware switching and rollback on boot. RMK itself provides the DFU USB interface (via `embassy-usb-dfu`) for subsequent updates, so once bootymcbootface and RMK are flashed, you never need to press BOOTSEL again.
 
 RMK and bootymcbootface use an **identical partition formula** so the layout always fits perfectly:
 
@@ -34,7 +34,7 @@ If you override `flash_size` in your `keyboard.toml`'s `[dfu]` section, RMK's au
 
 ### bootymcbootface
 
-You need the [bootymcbootface](https://codeberg.org/Schievel/bootymcbootface/) bootloader in the **correct flash size** for your board. The available versions are named by flash size, e.g.:
+You need the bootymcbootface bootloader (included in the RMK repo under `bootymcbootface/`) in the **correct flash size** for your board. The available versions are named by flash size, e.g.:
 
 **RP2040:**
 - `bootymcbootface-rp2040-2mb.uf2` – for 2 MB flash

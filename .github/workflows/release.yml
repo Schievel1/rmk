@@ -1,0 +1,35 @@
+name: Release bootymcbootface
+
+on:
+  push:
+    tags:
+      - "bootymcbootface-v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: rustup target add thumbv6m-none-eabi thumbv7em-none-eabihf
+
+      - name: Install build tools
+        run: cargo install cargo-make cargo-binutils cargo-hex-to-uf2
+
+      - name: Build all UF2 variants
+        working-directory: bootymcbootface
+        run: cargo make uf2-all
+
+      - name: Copy nRF ELF
+        run: cp bootymcbootface/target/thumbv7em-none-eabihf/release/bootymcbootface bootymcbootface/bootymcbootface-nrf52840.elf
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bootymcbootface/*.uf2
+            bootymcbootface/*.hex
+            bootymcbootface/bootymcbootface-nrf52840.elf
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
