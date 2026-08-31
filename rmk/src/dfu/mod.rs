@@ -1,52 +1,164 @@
-#[cfg(all(feature = "dfu_split", any(feature = "dfu_rp", feature = "dfu_nrf")))]
+#[cfg(feature = "dfu")]
+use core::cell::RefCell;
+#[cfg(feature = "dfu")]
+use core::sync::atomic::AtomicBool;
+#[cfg(feature = "dfu")]
 use core::sync::atomic::Ordering;
-#[cfg(feature = "dfu_lock")]
-use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "dfu_lock")]
+// ---------------------------------------------------------------------------
+// Flash partition types and constants
+// ---------------------------------------------------------------------------
+#[cfg(feature = "dfu")]
+use embassy_boot::{BlockingFirmwareState, BlockingFirmwareUpdater, FirmwareUpdaterConfig};
+#[cfg(feature = "dfu")]
+use embassy_embedded_hal::adapter::BlockingAsync;
+#[cfg(feature = "dfu")]
+pub use embassy_embedded_hal::flash::partition::BlockingPartition;
+#[cfg(feature = "dfu")]
+use embassy_sync::blocking_mutex::Mutex;
+#[cfg(feature = "dfu")]
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-#[cfg(feature = "dfu_lock")]
+#[cfg(feature = "dfu")]
 use embassy_sync::signal::Signal;
-use embassy_usb::control::{InResponse, OutResponse, Request};
-use embassy_usb::driver::Driver;
-use embassy_usb::types::{InterfaceNumber, StringIndex};
-use embassy_usb::{Builder, Handler};
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
+#[cfg(feature = "dfu")]
 use embassy_usb_dfu::{ResetImmediate, dfu::FirmwareHandler};
+use embedded_storage::nor_flash::NorFlash;
+#[cfg(feature = "dfu")]
+use heapless;
+#[cfg(feature = "dfu_lock")]
+use rmk_types::dfu::DfuStatus;
 use static_cell::StaticCell;
 
-#[cfg(feature = "dfu_lock")]
+#[cfg(feature = "dfu")]
 use crate::core_traits::Runnable;
+#[cfg(feature = "dfu_lock")]
+use crate::event::publish_event;
 
-// ---------------------------------------------------------------------------
-// Chip modules
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "dfu_nrf")]
-mod nrf;
+/// Total flash size passed to the embassy-rp Flash const generic.
+///
+/// Set to 16 MB (the maximum common RP2040 flash size) so that the same
+/// binary works on boards with 2, 4, 8 or 16 MB flash.  `new_blocking()`
+/// ignores this value at runtime — it is only used for software bounds
+/// checking inside embassy-rp.  Because all flash access goes through
+/// `BlockingPartition` (which has its own partition-sized bounds checks),
+/// overshooting the const generic is safe.
 #[cfg(feature = "dfu_rp")]
-mod rp;
+pub const FLASH_SIZE: usize = 16 * 1024 * 1024;
 
-#[cfg(feature = "dfu_nrf")]
-pub use self::nrf::{DFU_WRITE_SIZE, get_manager, init_flash, init_flash_from_linkerscript, mark_booted};
-#[cfg(feature = "dfu_rp")]
-pub use self::rp::{DFU_WRITE_SIZE, get_manager, init_flash, init_flash_from_linkerscript, mark_booted};
+/// Capacity of the aligned scratch buffer used by embassy-boot. Must be >=
+/// the largest `WRITE_SIZE` among all supported flash types (RP2040 internal
+/// flash and 25-series SPI NOR: 1; nRF NVMC: 4). The buffer is sliced to the
+/// state partition's exact `WRITE_SIZE` before being handed to embassy-boot.
+#[cfg(feature = "dfu")]
+pub const DFU_WRITE_SIZE: usize = 256;
 
-// ---------------------------------------------------------------------------
-// Chip-specific type aliases
-// ---------------------------------------------------------------------------
-
-/// DFU transfer block size in bytes. Larger values speed up firmware
-/// downloads. Must match the USB control buffer size used by the host.
+/// Block size of the a DFU download transferred per USB control request.
+/// Larger values speed up firmware downloads. Must match the USB control
+/// buffer size used by the host.
 pub const BLOCK_SIZE_DFU: usize = 512;
 
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-use embassy_embedded_hal::flash::partition::BlockingPartition;
+/// Partition layout read from the DFU symbols in `memory.x`.
+///
+/// The offsets are flash-relative and come from the `__bootloader_*` symbols
+/// that rmk-boot's generated `memory.x` provides.
+#[cfg(feature = "dfu")]
+#[derive(Clone, Copy, Debug)]
+pub struct DfuFlashLayout {
+    /// Offset of the DFU download partition.
+    pub dfu_offset: u32,
+    /// Size of the DFU download partition.
+    pub dfu_size: u32,
+    /// Offset of the boot state partition (holds the embassy-boot state flags).
+    pub state_offset: u32,
+    /// Size of the boot state partition.
+    pub state_size: u32,
+    /// Offset of the storage partition.
+    pub storage_offset: u32,
+    /// Size of the storage partition.
+    pub storage_size: u32,
+}
 
-#[cfg(feature = "dfu_nrf")]
-use self::nrf::{MutexType, PartitionType};
-#[cfg(feature = "dfu_rp")]
-use self::rp::{MutexType, PartitionType};
+/// Read the partition layout from the DFU symbols in `memory.x`.
+///
+/// # Safety
+///
+/// Reads linker-defined absolute symbols. The symbols must be present in the
+/// linked binary or the firmware will not link.
+#[cfg(feature = "dfu")]
+pub fn dfu_flash_layout() -> DfuFlashLayout {
+    unsafe extern "C" {
+        static __bootloader_state_start: u8;
+        static __bootloader_state_end: u8;
+        static __bootloader_dfu_start: u8;
+        static __bootloader_dfu_end: u8;
+        static __bootloader_storage_start: u8;
+        static __bootloader_storage_end: u8;
+    }
+    // SAFETY: linker-defined symbols — reading their addresses is safe.
+    DfuFlashLayout {
+        dfu_offset: core::ptr::addr_of!(__bootloader_dfu_start) as usize as u32,
+        dfu_size: core::ptr::addr_of!(__bootloader_dfu_end) as usize as u32
+            - core::ptr::addr_of!(__bootloader_dfu_start) as usize as u32,
+        state_offset: core::ptr::addr_of!(__bootloader_state_start) as usize as u32,
+        state_size: core::ptr::addr_of!(__bootloader_state_end) as usize as u32
+            - core::ptr::addr_of!(__bootloader_state_start) as usize as u32,
+        storage_offset: core::ptr::addr_of!(__bootloader_storage_start) as usize as u32,
+        storage_size: core::ptr::addr_of!(__bootloader_storage_end) as usize as u32
+            - core::ptr::addr_of!(__bootloader_storage_start) as usize as u32,
+    }
+}
+
+/// Blocking mutex guarding the internal flash, shared by all partitions.
+#[cfg(feature = "dfu")]
+pub type FlashMutex<F> = Mutex<CriticalSectionRawMutex, RefCell<F>>;
+
+/// A partition of the internal flash (DFU download, boot state, or storage).
+#[cfg(feature = "dfu")]
+pub type DfuPartition<'a, F> = BlockingPartition<'a, CriticalSectionRawMutex, F>;
+
+/// The storage partition adapted to async flash for the keymap/storage layer.
+#[cfg(feature = "dfu")]
+pub type DfuStorage<'a, F> = BlockingAsync<DfuPartition<'a, F>>;
+
+/// Build the storage, boot state and DFU download partitions from the
+/// `memory.x` layout (see [`dfu_flash_layout`]).
+///
+/// Returns `(storage, state, dfu)` partitions over the same flash mutex.
+/// `storage` is already wrapped as async flash — pass it straight to the
+/// keymap/storage layer. `state` feeds [`mark_booted`]; `dfu` and `state` go
+/// into [`RmkDfuInterface::new`].
+///
+/// When the DFU download partition lives on an external flash (`dfu_ext`),
+/// discard the returned `dfu` partition and build the external one yourself.
+#[cfg(feature = "dfu")]
+pub fn partitions_from_linkerscript<'a, F: NorFlash>(
+    flash_mutex: &'a FlashMutex<F>,
+) -> (DfuStorage<'a, F>, DfuPartition<'a, F>, DfuPartition<'a, F>) {
+    let layout = dfu_flash_layout();
+    let storage = BlockingAsync::new(DfuPartition::new(
+        flash_mutex,
+        layout.storage_offset,
+        layout.storage_size,
+    ));
+    let state = DfuPartition::new(flash_mutex, layout.state_offset, layout.state_size);
+    let dfu = DfuPartition::new(flash_mutex, layout.dfu_offset, layout.dfu_size);
+    (storage, state, dfu)
+}
+
+/// Mark firmware boot as successful so the bootloader doesn't revert the
+/// update on the next reset.
+///
+/// `state` is the boot state partition — typically built with
+/// [`partitions_from_linkerscript`].
+///
+/// Must be called *after* the firmware is confirmed running, before the
+/// bootloader's timeout would consider the update failed.
+#[cfg(feature = "dfu")]
+pub fn mark_booted<STATE: NorFlash>(state: &mut STATE) {
+    static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
+    let mut state = BlockingFirmwareState::new(state, &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE]);
+    state.mark_booted().ok();
+}
 
 // ---------------------------------------------------------------------------
 // dfu_split sub-module (behind feature flag)
@@ -55,7 +167,7 @@ use self::rp::{MutexType, PartitionType};
 #[cfg(feature = "dfu_split")]
 mod split;
 #[cfg(feature = "dfu_split")]
-use self::split::PassthroughDfuHandler;
+pub(crate) use self::split::PassthroughDfuHandler;
 #[cfg(feature = "dfu_split")]
 pub(crate) use self::split::{
     PASSTHROUGH_SIGNAL, PASSTHROUGH_TARGET, PassthroughCommand, passthrough_done_if_empty, passthrough_pending,
@@ -67,73 +179,66 @@ pub use self::split::{
 };
 
 // ---------------------------------------------------------------------------
-// DfuFlashManager — shared by RP2040 and nRF
+// DFU command channel (USB proxy → updater task)
 // ---------------------------------------------------------------------------
 
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-pub struct DfuFlashManager {
-    flash_mutex: &'static MutexType,
-    state_offset: u32,
-    state_size: u32,
-    dfu_offset: u32,
-    dfu_size: u32,
-    storage_offset: u32,
-    storage_size: u32,
+/// Command queue capacity — one USB control block plus slack.
+#[cfg(feature = "dfu")]
+const DFU_CMD_QUEUE_SIZE: usize = 2;
+
+/// A command forwarded from the USB DFU proxy to the async updater task.
+#[cfg(feature = "dfu")]
+pub(crate) enum DfuCmd {
+    Start,
+    Write(heapless::Vec<u8, { BLOCK_SIZE_DFU }>),
+    Finish,
+    SystemReset,
 }
 
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-impl DfuFlashManager {
-    pub(super) fn new(
-        flash_mutex: &'static MutexType,
-        storage_offset: u32,
-        storage_size: u32,
-        state_offset: u32,
-        state_size: u32,
-        dfu_offset: u32,
-        dfu_size: u32,
-    ) -> Self {
-        Self {
-            flash_mutex,
-            state_offset,
-            state_size,
-            dfu_offset,
-            dfu_size,
-            storage_offset,
-            storage_size,
-        }
-    }
+/// Fire-and-forget command queue. The USB DFU proxy (ISR context) pushes; the
+/// [`RmkDfuInterface`] updater task pops. Protected by a critical-section
+/// mutex so it is safe from both contexts.
+#[cfg(feature = "dfu")]
+pub(crate) static DFU_CMD: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<DfuCmd, DFU_CMD_QUEUE_SIZE>>> =
+    Mutex::new(RefCell::new(heapless::Vec::new()));
 
-    pub fn state_partition(&self) -> PartitionType {
-        BlockingPartition::new(self.flash_mutex, self.state_offset, self.state_size)
-    }
+/// Wakeup signal: set when a command is pushed to [`DFU_CMD`].
+#[cfg(feature = "dfu")]
+pub(crate) static DFU_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-    pub fn dfu_partition(&self) -> PartitionType {
-        BlockingPartition::new(self.flash_mutex, self.dfu_offset, self.dfu_size)
-    }
+/// Doorbell atomic: true while the command queue is non-empty. Read by the
+/// transport's GETSTATUS handling to inject `dfuDNBUSY` (adaptive host-side
+/// flow control, mirroring [`PASSTHROUGH_TARGET`]).
+#[cfg(feature = "dfu")]
+pub(crate) static DFU_BUSY: AtomicBool = AtomicBool::new(false);
 
-    pub fn storage_partition(&self) -> PartitionType {
-        BlockingPartition::new(self.flash_mutex, self.storage_offset, self.storage_size)
-    }
+/// Push a command into the queue (ISR-safe). Returns `Err(())` when full.
+#[cfg(feature = "dfu")]
+pub(crate) fn dfu_push(cmd: DfuCmd) -> Result<(), ()> {
+    DFU_CMD.lock(|c| c.borrow_mut().push(cmd).map_err(|_| ()))?;
+    DFU_BUSY.store(true, Ordering::Release);
+    DFU_WAKE.signal(());
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// DfuStringProvider
-// ---------------------------------------------------------------------------
-
-struct DfuStringProvider {
-    string_idx: StringIndex,
-    string_val: &'static str,
+/// Pop the next pending command (async updater task).
+#[cfg(feature = "dfu")]
+pub(crate) fn dfu_take() -> Option<DfuCmd> {
+    DFU_CMD.lock(|c| {
+        let v = &mut *c.borrow_mut();
+        if !v.is_empty() { Some(v.remove(0)) } else { None }
+    })
 }
 
-impl Handler for DfuStringProvider {
-    fn control_out(&mut self, _req: Request, _data: &[u8]) -> Option<OutResponse> {
-        None
-    }
-    fn control_in<'a>(&'a mut self, _req: Request, _buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        None
-    }
-    fn get_string(&mut self, index: StringIndex, _lang_id: u16) -> Option<&'static str> {
-        (index == self.string_idx).then_some(self.string_val)
+/// Clear the busy flag if the queue has drained.
+///
+/// Called by the updater task after every drain cycle. The host stays in
+/// `dfuDNBUSY` until the queue catches up.
+#[cfg(feature = "dfu")]
+pub(crate) fn dfu_clear_busy_if_empty() {
+    let empty = DFU_CMD.lock(|c| c.borrow().is_empty());
+    if empty {
+        DFU_BUSY.store(false, Ordering::Release);
     }
 }
 
@@ -153,263 +258,100 @@ pub fn is_dfu_unlocked() -> bool {
     !DFU_LOCKED.load(Ordering::Acquire)
 }
 
-// ---------------------------------------------------------------------------
-// RmkDfuHandler
-// ---------------------------------------------------------------------------
-
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-use embassy_usb::class::dfu::dfu_mode::DfuState;
+/// Gate shared by the transport's DFU start handlers (central alt 0 and the
+/// passthrough slots). Returns `Ok` when a download may proceed and records
+/// that it started; while the keys are locked it wakes the unlock state
+/// machine and rejects the download with `ErrVendor`.
 #[cfg(feature = "dfu")]
-use embassy_usb::class::dfu::{
-    consts::Status,
-    dfu_mode::{self},
-};
-#[cfg(any(feature = "dfu", feature = "dfu_lock"))]
-use rmk_types::dfu::DfuStatus;
-
-/// DFU handler wrapper that blinks an LED during transfer and checks the
-/// DFU lock (if `dfu_lock` feature is enabled).
-#[cfg(any(feature = "dfu", feature = "dfu_lock"))]
-use crate::event::publish_event;
-
-#[cfg(feature = "dfu")]
-struct RmkDfuHandler<H> {
-    inner: H,
-    target_id: Option<usize>,
-}
-
-#[cfg(feature = "dfu")]
-impl<H: dfu_mode::Handler> dfu_mode::Handler for RmkDfuHandler<H> {
-    fn start(&mut self) -> Result<(), Status> {
-        #[cfg(feature = "dfu_lock")]
+pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::Status> {
+    #[cfg(feature = "dfu_lock")]
+    {
+        use embassy_usb::class::dfu::consts::Status;
         if !is_dfu_unlocked() {
             DFU_UNLOCK_SIGNAL.signal(());
             info!("dfu_lock: DFU download rejected — keys not unlocked");
             return Err(Status::ErrVendor);
         }
-        #[cfg(feature = "dfu_lock")]
         DFU_STARTED.store(true, Ordering::Release);
-        match self.target_id {
-            Some(id) => info!("dfu: DFU download started (passthrough peripheral {})", id),
-            None => info!("dfu: DFU download started (central)"),
-        }
-        publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Started));
-        self.inner.start()
     }
-
-    fn write(&mut self, data: &[u8]) -> Result<(), Status> {
-        publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Downloading));
-        self.inner.write(data)
-    }
-
-    fn finish(&mut self) -> Result<(), Status> {
-        let res = self.inner.finish();
-        publish_event(crate::event::DfuStatusEvent::new(if res.is_ok() {
-            DfuStatus::Finished
-        } else {
-            DfuStatus::Error
-        }));
-        res
-    }
-
-    fn system_reset(&mut self) {
-        self.inner.system_reset()
-    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// RmkDfuInterface — single USB handler for all DFU alt settings
+// RmkDfuInterface — partition-based DFU updater task
 // ---------------------------------------------------------------------------
 
 /// Max passthrough alt settings supported on a single DFU interface.
 #[cfg(feature = "dfu_split")]
-const MAX_PASSTHROUGH_ALTS: usize = 4;
+pub(crate) const MAX_PASSTHROUGH_ALTS: usize = 4;
 
-/// Single USB `Handler` that owns all DFU alternate settings.
+/// Flash-side DFU updater.
 ///
-/// Alt 0 is always the central's own DFU flash.  Alt 1..N are passthrough
-/// slots for split peripherals (requires `dfu_split`).
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-struct RmkDfuInterface {
-    central:
-        DfuState<RmkDfuHandler<FirmwareHandler<'static, PartitionType, PartitionType, ResetImmediate, BLOCK_SIZE_DFU>>>,
-    #[cfg(feature = "dfu_split")]
-    passthrough: [Option<DfuState<RmkDfuHandler<PassthroughDfuHandler>>>; MAX_PASSTHROUGH_ALTS],
-    #[cfg(feature = "dfu_split")]
-    num_passthrough: usize,
-    current_alt: u8,
+/// Owns the DFU download and boot state partitions together with the
+/// embassy-boot firmware updater, and runs as a [`Runnable`] task. It waits on
+/// the command channel ([`DFU_CMD`]) and executes `start`/`write`/`finish`/
+/// `system_reset` on the firmware handler, fully decoupled from the USB
+/// device.
+///
+/// The USB side (the proxy in `usb.rs`) never touches flash; all commands flow
+/// through the channel. The partitions are typically built with
+/// [`partitions_from_linkerscript`]:
+///
+/// ```
+/// let flash_mutex = ::rmk::dfu::FlashMutex::new(core::cell::RefCell::new(<flash_driver>));
+/// let (_, mut state_partition, dfu_partition) =
+///     ::rmk::dfu::partitions_from_linkerscript(&flash_mutex);
+/// let mut dfu_iface = ::rmk::dfu::RmkDfuInterface::new(dfu_partition, state_partition);
+/// ```
+#[cfg(feature = "dfu")]
+pub struct RmkDfuInterface<DFU: NorFlash, STATE: NorFlash> {
+    handler: FirmwareHandler<'static, DFU, STATE, ResetImmediate, BLOCK_SIZE_DFU>,
 }
 
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-impl Handler for RmkDfuInterface {
-    fn set_alternate_setting(&mut self, _iface: InterfaceNumber, alternate_setting: u8) {
-        self.current_alt = alternate_setting;
+#[cfg(feature = "dfu")]
+impl<DFU: NorFlash, STATE: NorFlash> RmkDfuInterface<DFU, STATE> {
+    /// Build the DFU updater from a DFU download partition and a boot state
+    /// partition.
+    pub fn new(dfu: DFU, state: STATE) -> Self {
+        const { core::assert!(STATE::WRITE_SIZE <= DFU_WRITE_SIZE) };
+        let config = FirmwareUpdaterConfig { dfu, state };
+        static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
+        let aligned: &'static mut [u8] = &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE];
+        let updater = BlockingFirmwareUpdater::new(config, aligned);
+        let handler = FirmwareHandler::new(updater, ResetImmediate);
+        Self { handler }
     }
+}
 
-    fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
-        match self.current_alt {
-            0 => self.central.control_out(req, data),
-            #[cfg(feature = "dfu_split")]
-            n => {
-                let idx = (n as usize).saturating_sub(1);
-                self.passthrough_slots(idx).and_then(|s| s.control_out(req, data))
-            }
-            #[cfg(not(feature = "dfu_split"))]
-            _ => None,
-        }
-    }
-
-    fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        match self.current_alt {
-            0 => self.central.control_in(req, buf),
-            #[cfg(feature = "dfu_split")]
-            n => {
-                let idx = (n as usize).saturating_sub(1);
-                let buf_ptr = buf.as_mut_ptr();
-                let resp = self.passthrough_slots(idx).and_then(|s| s.control_in(req, buf));
-                // ── Flow control: dfuDNBUSY override ──────────────────────
-                // Byte 4 of the GETSTATUS response (6 bytes) is the `state`
-                // field.  While PASSTHROUGH_TARGET is set (!= usize::MAX) we override
-                // it with 4 (= dfuDNBUSY).  dfu-util then waits 50 ms and polls again
-                // — adaptive back-pressure without a fixed timeout.
-                // Uses a volatile store because `buf` is still borrowed by
-                // `resp` at this point.
-                if resp.is_some() && PASSTHROUGH_TARGET.load(Ordering::Acquire) != usize::MAX {
-                    unsafe {
-                        core::ptr::write_volatile(buf_ptr.add(4), 4u8);
+#[cfg(feature = "dfu")]
+impl<DFU: NorFlash, STATE: NorFlash> Runnable for RmkDfuInterface<DFU, STATE> {
+    async fn run(&mut self) -> ! {
+        use embassy_usb::class::dfu::dfu_mode::Handler as _;
+        loop {
+            DFU_WAKE.wait().await;
+            while let Some(cmd) = dfu_take() {
+                match cmd {
+                    DfuCmd::Start => {
+                        if self.handler.start().is_err() {
+                            error!("dfu: firmware updater start failed");
+                        }
                     }
+                    DfuCmd::Write(data) => {
+                        if self.handler.write(&data).is_err() {
+                            error!("dfu: firmware updater write failed");
+                        }
+                    }
+                    DfuCmd::Finish => {
+                        if self.handler.finish().is_err() {
+                            error!("dfu: firmware updater finish failed");
+                        }
+                    }
+                    DfuCmd::SystemReset => self.handler.system_reset(),
                 }
-                resp
             }
-            #[cfg(not(feature = "dfu_split"))]
-            _ => None,
+            dfu_clear_busy_if_empty();
         }
     }
-}
-
-#[cfg(feature = "dfu_split")]
-impl RmkDfuInterface {
-    fn passthrough_slots(&mut self, idx: usize) -> Option<&mut DfuState<RmkDfuHandler<PassthroughDfuHandler>>> {
-        self.passthrough.get_mut(idx)?.as_mut()
-    }
-}
-
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-static RMK_DFU_INTERFACE: StaticCell<RmkDfuInterface> = StaticCell::new();
-
-// ---------------------------------------------------------------------------
-// register_dfu_interface — register DFU interface with central + passthrough alts
-// ---------------------------------------------------------------------------
-
-/// Register a DFU interface on the USB builder.
-///
-/// Alt 0 is always the central's own DFU flash.
-/// Alt 1..N are passthrough slots for split peripherals (requires `dfu_split`).
-#[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-pub fn register_dfu_interface<D: Driver<'static>>(
-    builder: &mut Builder<'static, D>,
-    mgr: &'static DfuFlashManager,
-    product_name: &'static str,
-    #[cfg(feature = "dfu_split")] num_peripherals: usize,
-) {
-    use embassy_boot::{BlockingFirmwareUpdater, FirmwareUpdaterConfig};
-    use embassy_usb::class::dfu::consts::DfuAttributes;
-
-    let dfu_part = mgr.dfu_partition();
-    let state_part = mgr.state_partition();
-    let config = FirmwareUpdaterConfig {
-        dfu: dfu_part,
-        state: state_part,
-    };
-    static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
-    let aligned: &'static mut [u8] = ALIGNED.init([0; DFU_WRITE_SIZE]);
-    let updater = BlockingFirmwareUpdater::new(config, aligned);
-
-    // Alt 0: Central flash
-    let central_attrs = DfuAttributes::CAN_DOWNLOAD | DfuAttributes::WILL_DETACH;
-    // embassy-usb's DfuAttributes is Copy only under defmt, so read the bits before the move
-    let central_attrs_bits = central_attrs.bits();
-    let central_handler = RmkDfuHandler {
-        inner: FirmwareHandler::new(updater, ResetImmediate),
-        target_id: None,
-    };
-    let central_state = DfuState::new(central_handler, central_attrs);
-
-    // Alt 1..N: Passthrough
-    #[cfg(feature = "dfu_split")]
-    let passthrough_count = num_peripherals.min(MAX_PASSTHROUGH_ALTS);
-    #[cfg(feature = "dfu_split")]
-    let passthrough = {
-        let mut arr: [Option<DfuState<RmkDfuHandler<PassthroughDfuHandler>>>; MAX_PASSTHROUGH_ALTS] =
-            Default::default();
-        for id in 0..passthrough_count {
-            let state = DfuState::new(
-                RmkDfuHandler {
-                    inner: PassthroughDfuHandler {
-                        target_id: id,
-                        written: 0,
-                    },
-                    target_id: Some(id),
-                },
-                DfuAttributes::CAN_DOWNLOAD,
-            );
-            arr[id] = Some(state);
-        }
-        arr
-    };
-
-    let string_idx = builder.string();
-
-    let mut func = builder.function(0x00, 0x00, 0x00);
-    let mut iface = func.interface();
-    let mut alt = iface.alt_setting(0xFE, 0x01, 0x02, Some(string_idx));
-    alt.descriptor(
-        0x21,
-        &[
-            central_attrs_bits,
-            0xc4,
-            0x09,
-            (BLOCK_SIZE_DFU & 0xff) as u8,
-            ((BLOCK_SIZE_DFU >> 8) & 0xff) as u8,
-            0x10,
-            0x01,
-        ],
-    );
-
-    #[cfg(feature = "dfu_split")]
-    for _ in 0..passthrough_count {
-        let mut alt = iface.alt_setting(0xFE, 0x01, 0x02, Some(string_idx));
-        alt.descriptor(
-            0x21,
-            &[
-                DfuAttributes::CAN_DOWNLOAD.bits(),
-                0xc4,
-                0x09,
-                (BLOCK_SIZE_DFU & 0xff) as u8,
-                ((BLOCK_SIZE_DFU >> 8) & 0xff) as u8,
-                0x10,
-                0x01,
-            ],
-        );
-    }
-    drop(func);
-
-    let iface_ref = RMK_DFU_INTERFACE.init(RmkDfuInterface {
-        central: central_state,
-        #[cfg(feature = "dfu_split")]
-        passthrough,
-        #[cfg(feature = "dfu_split")]
-        num_passthrough: passthrough_count,
-        current_alt: 0,
-    });
-    builder.handler(iface_ref);
-
-    static STRING_PROVIDER: StaticCell<DfuStringProvider> = StaticCell::new();
-    let string_provider = STRING_PROVIDER.init(DfuStringProvider {
-        string_idx,
-        string_val: product_name,
-    });
-    builder.handler(string_provider);
 }
 
 // ---------------------------------------------------------------------------
