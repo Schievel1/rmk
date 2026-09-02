@@ -31,9 +31,9 @@ watchdog = []
 ## Expose the `run_tests!` simulator-scenario macro (rmk test suite only)
 _simulator = ["dep:toml", "dep:serde", "dep:serde_json"]
 ## Base DFU code generation, pulled by `dfu_rp`/`dfu_nrf`
-dfu = []
-dfu_rp = ["dfu"]
-dfu_nrf = ["dfu"]
+_dfu = []
+dfu_rp = ["_dfu"]
+dfu_nrf = ["_dfu"]
 dfu_split = []
 dfu_ext = []
 

@@ -7,11 +7,8 @@ mod keymap;
 mod macros;
 mod vial;
 
-use core::cell::RefCell;
-
 use defmt::info;
 use defmt_rtt as _;
-use embassy_embedded_hal::flash::partition::BlockingPartition;
 use embassy_executor::Spawner;
 use embassy_rp::flash::Flash;
 use embassy_rp::gpio::{Input, Level, Output};
@@ -20,13 +17,10 @@ use embassy_rp::spi::{self, Spi};
 use embassy_rp::uart::{self, BufferedUart};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{bind_interrupts, dma};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
-use embedded_storage::nor_flash::ReadNorFlash;
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{partitions_from_linkerscript, FlashMutex, RmkDfuInterface};
+use rmk::dfu::{partitions_from_linkerscript, FlashMutex, Partition, RmkDfuInterface};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::futures::future::join;
 use rmk::host::HostService;
@@ -36,19 +30,20 @@ use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::processor::builtin::wpm::WpmProcessor;
 use rmk::split::central::run_peripheral_manager;
 use rmk::split::{PeripheralMatrixConfig, SPLIT_MESSAGE_MAX_SIZE};
+use rmk::storage::async_flash_wrapper;
 use rmk::usb::UsbTransport;
 use rmk::watchdog::Rp2040Watchdog;
 use rmk::{initialize_keymap_and_storage, run_all, KeymapData};
 use static_cell::StaticCell;
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
 
-type ExternalFlash = W25qNorFlash<spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>;
-type ExternalPartition<'a> = BlockingPartition<'a, CriticalSectionRawMutex, ExternalFlash>;
+type ExternalFlash = W25qNorFlash<spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Async>, Output<'static>>;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
     UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
-    DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>;
+    DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH3>,
+               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>;
 });
 
 const PERIPHERAL1_BIN: &[u8] = include_bytes!(concat!(
@@ -65,21 +60,31 @@ async fn main(_spawner: Spawner) {
 
     let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7], output: [PIN_10, PIN_11]);
 
-    // External DFU flash via SPI0. The DFU download partition lives on the
-    // external SPI flash; the internal flash only holds boot state and
-    // storage. Match the wiring to the dfu_ext rmk-boot build.
-    let dfu_spi = Spi::new_blocking(p.SPI0, p.PIN_18, p.PIN_19, p.PIN_16, spi::Config::default());
+    // External DFU flash via SPI0 (async with DMA)
+    let dfu_spi = Spi::new(
+        p.SPI0,
+        p.PIN_18,
+        p.PIN_19,
+        p.PIN_16,
+        p.DMA_CH3,
+        p.DMA_CH4,
+        Irqs,
+        spi::Config::default(),
+    );
     let dfu_cs = Output::new(p.PIN_17, Level::High);
     let ext_flash = ExternalFlash::new(dfu_spi, dfu_cs, 8 * 1024 * 1024);
 
-    let dfu_mutex = Mutex::new(RefCell::new(ext_flash));
-    let dfu_partition = ExternalPartition::new(&dfu_mutex, 0, dfu_mutex.lock(|c| c.borrow().capacity() as u32));
+    let dfu_mutex =
+        embassy_sync::mutex::Mutex::<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, _>::new(ext_flash);
+    let dfu_partition = Partition::new(&dfu_mutex, 0, 8 * 1024 * 1024);
 
     // Internal flash only provides the boot state and storage partitions —
     // the internal DFU partition from the linkerscript layout is discarded.
-    let flash_mutex = FlashMutex::new(RefCell::new(Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(
-        p.FLASH,
-    )));
+    let flash_mutex = FlashMutex::new(async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
     let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
 
     let keyboard_device_config = DeviceConfig {
@@ -117,7 +122,7 @@ async fn main(_spawner: Spawner) {
     .await;
 
     // mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // DFU LED processor, optional. Flashes the LED when DFU is active
     let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);

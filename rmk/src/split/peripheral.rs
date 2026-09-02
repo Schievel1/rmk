@@ -5,7 +5,7 @@ use embassy_futures::select::{Either, select};
 #[cfg(not(feature = "_ble"))]
 use embedded_io_async::{Read, Write};
 #[cfg(all(feature = "dfu_split", not(feature = "_ble")))]
-use embedded_storage::nor_flash::NorFlash;
+use embedded_storage_async::nor_flash::NorFlash;
 use futures::FutureExt;
 #[cfg(all(feature = "_ble", feature = "storage"))]
 use {super::ble::PeerAddress, crate::channel::FLASH_CHANNEL};
@@ -203,7 +203,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::FirmwareChunk { offset, len, data } => {
                             let actual_len = len as usize;
                             let chunk_data = &data.0[..actual_len];
-                            match dfu_handler.write_chunk(offset as u32, chunk_data) {
+                            match dfu_handler.write_chunk(offset as u32, chunk_data).await {
                                 Ok(()) => {
                                     debug!("dfu_split: wrote {} bytes at offset {}", actual_len, offset);
                                     let ack = SplitMessage::FirmwareChunkAck {
@@ -217,7 +217,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         }
                         #[cfg(feature = "dfu_split")]
                         SplitMessage::FirmwareUpdateComplete => {
-                            let dfu_crc = match dfu_handler.compute_dfu_crc() {
+                            let dfu_crc = match dfu_handler.compute_dfu_crc().await {
                                 Ok(crc) => crc,
                                 Err(()) => {
                                     // No CRC report: the central's verification
@@ -258,7 +258,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                             if ok {
                                 self.split_driver.write(&SplitMessage::FirmwareUpdateConfirm).await.ok();
                                 embassy_time::Timer::after_millis(50).await;
-                                dfu_handler.mark_updated_and_reset().ok();
+                                dfu_handler.mark_updated_and_reset().await.ok();
                             }
                         }
                         _ => (),

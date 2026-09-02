@@ -47,7 +47,7 @@ macro_rules! impl_payload_wrapper {
 mod action;
 mod battery;
 mod connection;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 mod dfu;
 mod input;
 #[cfg(feature = "split")]
@@ -57,7 +57,7 @@ mod state;
 pub use action::ActionEvent;
 pub use battery::{BatteryAdcEvent, BatteryStatusEvent, ChargingStateEvent};
 pub use connection::{ConnectionStatus, ConnectionStatusChangeEvent, ConnectionType};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 pub use dfu::DfuStatusEvent;
 pub use input::{
     Axis, AxisEvent, AxisValType, KeyPos, KeyboardEvent, KeyboardEventPos, ModifierEvent, PointingEvent,

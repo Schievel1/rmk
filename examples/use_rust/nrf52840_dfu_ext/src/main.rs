@@ -7,31 +7,25 @@ mod keymap;
 mod macros;
 mod vial;
 
-use core::cell::RefCell;
-
 use defmt::info;
 use defmt_rtt as _;
-use embassy_embedded_hal::flash::partition::BlockingPartition;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive};
 use embassy_nrf::interrupt::InterruptExt;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-// `ReadNorFlash` is needed for `.capacity()` on the external flash below.
-use embedded_storage::nor_flash::ReadNorFlash;
 use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashMutex, Partition, RmkDfuInterface, partitions_from_linkerscript};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::wpm::WpmProcessor;
+use rmk::storage::async_flash_wrapper;
 use rmk::usb::UsbTransport;
 use rmk::{KeymapData, initialize_keymap_and_storage, run_all};
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
@@ -42,12 +36,7 @@ bind_interrupts!(struct Irqs {
     TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
 });
 
-// External SPI flash (25-series NOR, e.g. W25Q64), used as the DFU download
-// slot. `spim::Spim<'static>` + `Output<'static>` must match the concrete
-// driver types below.
 type ExternalFlash = W25qNorFlash<spim::Spim<'static>, Output<'static>>;
-// The DFU download partition slices the external flash (offset 0).
-type ExternalPartition<'a> = BlockingPartition<'a, CriticalSectionRawMutex, ExternalFlash>;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -67,9 +56,7 @@ async fn main(_spawner: Spawner) {
     let (row_pins, col_pins) =
         config_matrix_pins_nrf!(peripherals: p, input: [P0_07, P0_02, P0_11, P0_12], output: [P1_15, P0_31, P0_29]);
 
-    // External DFU flash via SPIM0 (TWISPI0). Board wiring: SCK P0_17,
-    // MISO P0_20, MOSI P0_22, CS P0_24 — must match the bootloader's
-    // ext-flash setup.
+    // External DFU flash via SPIM0 (TWISPI0) — nRF SPIM is natively async.
     let mut dfu_spi_cfg = spim::Config::default();
     dfu_spi_cfg.frequency = spim::Frequency::M8;
     let dfu_spi = spim::Spim::new(p.TWISPI0, Irqs, p.P0_17, p.P0_20, p.P0_22, dfu_spi_cfg);
@@ -77,15 +64,13 @@ async fn main(_spawner: Spawner) {
 
     let ext_flash = ExternalFlash::new(dfu_spi, dfu_cs, 8 * 1024 * 1024);
 
-    // Park the external flash behind a mutex. The external flash becomes the
-    // DFU download partition; the internal flash only holds the boot state
-    // and storage partitions. Offsets come from the DFU symbols in memory.x.
-    let dfu_mutex = Mutex::new(RefCell::new(ext_flash));
-    let dfu_partition = ExternalPartition::new(&dfu_mutex, 0, dfu_mutex.lock(|c| c.borrow().capacity() as u32));
+    let dfu_mutex =
+        embassy_sync::mutex::Mutex::<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, _>::new(ext_flash);
+    let dfu_partition = Partition::new(&dfu_mutex, 0, 8 * 1024 * 1024);
 
     // Internal flash: only the boot state and storage partitions are used, so
     // the internal DFU partition from the linkerscript layout is discarded.
-    let flash_mutex = FlashMutex::new(RefCell::new(Nvmc::new(p.NVMC)));
+    let flash_mutex = FlashMutex::new(async_flash_wrapper(Nvmc::new(p.NVMC)));
     let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::new(
@@ -127,7 +112,7 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     let debouncer = DefaultDebouncer::new();
     let mut matrix = Matrix::<_, _, _, ROW, COL, true>::new(row_pins, col_pins, debouncer);

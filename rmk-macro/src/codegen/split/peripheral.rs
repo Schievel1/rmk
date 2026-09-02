@@ -333,10 +333,28 @@ fn expand_bind_interrupt_for_split_peripheral(
                     }
                 }
             } else if !display_interrupt.is_empty() || !iqs5xx_interrupt.is_empty() || dfu_enabled {
+                // DFU external SPI flash DMA channels
+                let dfu_dma_channels = dfu
+                    .and_then(|d| d.external_flash.as_ref())
+                    .map(|ext| {
+                        let tx = format_ident!(
+                            "{}",
+                            ext.spi.tx_dma.as_ref().expect("dfu.external_flash.spi.tx_dma is required for RP2040")
+                        );
+                        let rx = format_ident!(
+                            "{}",
+                            ext.spi.rx_dma.as_ref().expect("dfu.external_flash.spi.rx_dma is required for RP2040")
+                        );
+                        quote! {
+                            DMA_IRQ_0 => ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#tx>, ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#rx>;
+                        }
+                    })
+                    .unwrap_or_default();
                 quote! {
                     use ::embassy_rp::bind_interrupts;
                     bind_interrupts!(struct Irqs {
                         #usb_int
+                        #dfu_dma_channels
                         #iqs5xx_interrupt
                         #display_interrupt
                     });
@@ -390,7 +408,7 @@ fn expand_split_peripheral(
     // Mark booted when DFU is enabled so the bootloader doesn't
     // revert the previous update.
     if dfu_enabled {
-        chip_init.extend(quote! { ::rmk::dfu::mark_booted(&mut state_partition); });
+        chip_init.extend(quote! { ::rmk::dfu::mark_booted(&mut state_partition).await; });
     }
     // Clone the partitions for over-the-split-link firmware updates so the
     // originals can still be moved into the USB DFU updater below.

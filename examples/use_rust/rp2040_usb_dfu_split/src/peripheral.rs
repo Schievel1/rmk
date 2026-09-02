@@ -40,12 +40,14 @@ async fn main(_spawner: Spawner) {
 
     let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_9, PIN_11], output: [PIN_10, PIN_12]);
 
-    let flash_mutex = FlashMutex::new(core::cell::RefCell::new(
-        Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(p.FLASH),
-    ));
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
     let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // DFU USB device so the peripheral can be firmware-updated via USB
     let dfu_driver = Driver::new(p.USB, Irqs);

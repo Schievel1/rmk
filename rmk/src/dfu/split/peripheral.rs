@@ -1,14 +1,16 @@
 use core::sync::atomic::Ordering;
 
-use embassy_embedded_hal::flash::partition::BlockingPartition;
+#[cfg(feature = "dfu_nrf")]
+use embassy_boot::{FirmwareUpdater, FirmwareUpdaterConfig};
+#[cfg(feature = "dfu_rp")]
+use embassy_boot_rp::{FirmwareUpdater, FirmwareUpdaterConfig};
 #[cfg(feature = "dfu_nrf")]
 use embassy_nrf::nvmc::Nvmc;
 #[cfg(feature = "dfu_rp")]
 use embassy_rp::flash::{Blocking, Flash};
 #[cfg(feature = "dfu_rp")]
 use embassy_rp::peripherals::FLASH;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embedded_storage::nor_flash::NorFlash;
+use embedded_storage_async::nor_flash::NorFlash;
 use rmk_types::dfu::DfuStatus;
 use static_cell::StaticCell;
 
@@ -16,10 +18,13 @@ use crate::event::{DfuStatusEvent, publish_event};
 
 /// The DFU/state partition type over the build's internal flash.
 #[cfg(feature = "dfu_rp")]
-pub type InternalFlashPartition =
-    BlockingPartition<'static, CriticalSectionRawMutex, Flash<'static, FLASH, Blocking, { super::super::FLASH_SIZE }>>;
+pub type InternalFlashPartition = crate::dfu::DfuPartition<
+    'static,
+    embassy_embedded_hal::adapter::BlockingAsync<Flash<'static, FLASH, Blocking, { super::super::FLASH_SIZE }>>,
+>;
 #[cfg(feature = "dfu_nrf")]
-pub type InternalFlashPartition = BlockingPartition<'static, CriticalSectionRawMutex, Nvmc<'static>>;
+pub type InternalFlashPartition =
+    crate::dfu::DfuPartition<'static, embassy_embedded_hal::adapter::BlockingAsync<Nvmc<'static>>>;
 
 // =========================================================================
 // SplitDfuHandler — peripheral-side firmware writing
@@ -71,7 +76,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> SplitDfuHandler<DFU, STATE>
     /// Pages are erased on demand — only the first time a particular page
     /// is encountered.  This avoids a long blocking erase of the entire
     /// DFU partition on the very first chunk.
-    pub fn write_chunk(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
+    pub async fn write_chunk(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
         if self.written_len == 0 {
             info!("dfu_split: firmware update started");
         }
@@ -82,11 +87,13 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> SplitDfuHandler<DFU, STATE>
         let end_page = (end - 1) / erase_size;
         for page in start_page..=end_page {
             if self.last_erased_page != Some(page) {
-                dfu.erase(page * erase_size, (page + 1) * erase_size).map_err(|_| ())?;
+                dfu.erase(page * erase_size, (page + 1) * erase_size)
+                    .await
+                    .map_err(|_| ())?;
                 self.last_erased_page = Some(page);
             }
         }
-        dfu.write(offset, data).map_err(|_| ())?;
+        dfu.write(offset, data).await.map_err(|_| ())?;
         self.written_len = self.written_len.max(offset + data.len() as u32);
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         Ok(())
@@ -97,7 +104,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> SplitDfuHandler<DFU, STATE>
     /// Called by the peripheral during end-to-end verification before
     /// resetting into the new firmware.  Only the bytes up to the
     /// highest written offset are included.
-    pub fn compute_dfu_crc(&self) -> Result<u32, ()> {
+    pub async fn compute_dfu_crc(&self) -> Result<u32, ()> {
         let mut dfu = self.dfu_partition.clone();
         let len = self.written_len as usize;
         let mut crc = crate::crc32::Crc32::new();
@@ -105,7 +112,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> SplitDfuHandler<DFU, STATE>
         let mut pos = 0u32;
         while (pos as usize) < len {
             let chunk_len = core::cmp::min(256, len - pos as usize);
-            dfu.read(pos, &mut buf[..chunk_len]).map_err(|_| ())?;
+            dfu.read(pos, &mut buf[..chunk_len]).await.map_err(|_| ())?;
             crc.update(&buf[..chunk_len]);
             pos += chunk_len as u32;
         }
@@ -114,22 +121,34 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> SplitDfuHandler<DFU, STATE>
 
     /// Mark the new firmware as valid and reset into it.
     ///
-    /// Calls `embassy-boot`'s `mark_updated` and then performs a
+    /// Calls `embassy-boot`'s async `mark_updated` and then performs a
     /// system reset.  The bootloader will copy the DFU slot to the
     /// active slot on the next boot.
-    pub fn mark_updated_and_reset(&self) -> Result<(), ()> {
-        #[cfg(feature = "dfu_nrf")]
-        use embassy_boot::{BlockingFirmwareUpdater, FirmwareUpdaterConfig};
-        #[cfg(feature = "dfu_rp")]
-        use embassy_boot_rp::{BlockingFirmwareUpdater, FirmwareUpdaterConfig};
+    pub async fn mark_updated_and_reset(&self) -> Result<(), ()> {
+        let mut dfu = self.dfu_partition.clone();
+        let mut hdr = [0u8; 8];
+        dfu.read(0, &mut hdr).await.map_err(|_| ())?;
+        info!("dfu_split: DFU[0..8] = {:02x}", hdr);
+        let all_ff = hdr.iter().all(|&b| b == 0xFF);
+        let all_00 = hdr.iter().all(|&b| b == 0x00);
+        let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let reset = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if all_ff || all_00 || msp == 0 || msp == 0xFFFF_FFFF || reset == 0 || reset == 0xFFFF_FFFF {
+            error!(
+                "dfu_split: sanity check failed (msp={:#010x}, reset={:#010x}), aborting",
+                msp, reset
+            );
+            return Err(());
+        }
         let config = FirmwareUpdaterConfig {
             dfu: self.dfu_partition.clone(),
             state: self.state_partition.clone(),
         };
         static ALIGNED: StaticCell<[u8; crate::dfu::DFU_WRITE_SIZE]> = StaticCell::new();
-        let aligned: &mut [u8] = &mut ALIGNED.init([0; crate::dfu::DFU_WRITE_SIZE])[..<DFU as NorFlash>::WRITE_SIZE];
-        let mut updater = BlockingFirmwareUpdater::new(config, aligned);
-        updater.mark_updated().map_err(|_| ())?;
+        let aligned: &'static mut [u8] =
+            &mut ALIGNED.init([0; crate::dfu::DFU_WRITE_SIZE])[..<DFU as NorFlash>::WRITE_SIZE];
+        let mut updater = FirmwareUpdater::new(config, aligned);
+        updater.mark_updated().await.map_err(|_| ())?;
         publish_event(DfuStatusEvent::new(DfuStatus::Finished));
         cortex_m::peripheral::SCB::sys_reset()
     }
