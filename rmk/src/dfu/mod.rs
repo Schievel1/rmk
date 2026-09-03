@@ -45,25 +45,11 @@
 //! │  mark_updated_and_reset() only on FirmwareCrcOk                │
 //! └─────────────────────────────────────────────────────────────────┘
 //!
-//! ## Flash layout (from memory.x)
-//!
-//! ```text
-//! 0x00000000  ┌─────────────────┐
-//!             │ Application FW  │
-//! 0x__DFU__   ├─────────────────┤  DFU download partition
-//!             │ Incoming FW     │  (USB writes here)
-//! 0x__STATE__ ├─────────────────┤  Boot state (embassy-boot flags)
-//!             │ State flags     │
-//! 0x__STOR__  ├─────────────────┤  Storage (keymap, config)
-//!             │ Persistent data │
-//! 0xFFFFFF__  └─────────────────┘
-//! ```
 
-#[cfg(feature = "_dfu")]
+#[cfg(feature = "dfu_lock")]
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "_dfu")]
 use core::sync::atomic::AtomicU32;
-#[cfg(feature = "_dfu")]
 use core::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
@@ -257,33 +243,8 @@ pub(crate) enum DfuCmd {
 #[cfg(feature = "_dfu")]
 pub(crate) static DFU_CHANNEL: Channel<CriticalSectionRawMutex, DfuCmd, DFU_CMD_QUEUE_SIZE> = Channel::new();
 
-/// Doorbell atomic: true while the command queue is non-empty. Read by the
-/// transport's GETSTATUS handling to inject `dfuDNBUSY` (adaptive host-side
-/// flow control).
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_BUSY: AtomicBool = AtomicBool::new(false);
-
 #[cfg(feature = "_dfu")]
 pub(crate) static DFU_WRITE_ERRORS: AtomicU32 = AtomicU32::new(0);
-
-/// Push a command into the queue (ISR-safe). Returns `Err(())` when full.
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_push(cmd: DfuCmd) -> Result<(), ()> {
-    DFU_CHANNEL.try_send(cmd).map_err(|_| ())?;
-    DFU_BUSY.store(true, Ordering::Release);
-    Ok(())
-}
-
-/// Clear the busy flag if the queue has drained.
-///
-/// Called by the updater task after every drain cycle. The host stays in
-/// `dfuDNBUSY` until the queue catches up.
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_clear_busy_if_empty() {
-    if DFU_CHANNEL.is_empty() {
-        DFU_BUSY.store(false, Ordering::Release);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DFU lock state
@@ -490,7 +451,6 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandle
             while let Ok(cmd) = DFU_CHANNEL.try_receive() {
                 self.handle_cmd(cmd).await;
             }
-            dfu_clear_busy_if_empty();
         }
     }
 }

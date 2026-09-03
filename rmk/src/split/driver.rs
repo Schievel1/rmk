@@ -226,7 +226,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
         loop {
             #[cfg(feature = "dfu_split")]
-            if crate::dfu::DFU_BUSY.load(core::sync::atomic::Ordering::Acquire) {
+            if !crate::dfu::DFU_CHANNEL.is_empty() {
                 self.handle_dfu_passthrough().await;
                 continue;
             }
@@ -352,7 +352,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
     /// Process DFU passthrough chunks from the unified DFU channel.
     ///
-    /// Called from the event loop when [`DFU_BUSY`] is set. Peeks on
+    /// Called from the event loop when `DFU_CHANNEL` has pending commands. Peeks on
     /// [`DFU_CHANNEL`] and forwards commands targeted at this peripheral
     /// over the split link.
     ///
@@ -394,7 +394,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         };
                         if self.send(&msg).await.is_err() {
                             error!("dfu_split: disconnected during chunk send");
-                            crate::dfu::dfu_clear_busy_if_empty();
                             return;
                         }
 
@@ -416,7 +415,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         }
                     }
 
-                    crate::dfu::dfu_clear_busy_if_empty();
                 }
                 crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
                     // Consume the message
@@ -426,7 +424,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
                     if self.send(&SplitMessage::FirmwareUpdateComplete).await.is_err() {
                         error!("dfu_split: disconnected during finish");
-                        crate::dfu::dfu_clear_busy_if_empty();
                         return;
                     }
 
@@ -449,7 +446,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     let Some(peripheral_crc) = crc else {
                         error!("dfu_split: CRC verification failed");
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
-                        crate::dfu::dfu_clear_busy_if_empty();
                         return;
                     };
 
@@ -462,14 +458,12 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             central_crc, peripheral_crc
                         );
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
-                        crate::dfu::dfu_clear_busy_if_empty();
                         return;
                     }
 
                     info!("dfu_split: CRC OK, confirming update");
                     if self.send(&SplitMessage::FirmwareCrcOk).await.is_err() {
                         error!("dfu_split: disconnected during CRC OK");
-                        crate::dfu::dfu_clear_busy_if_empty();
                         return;
                     }
 
@@ -492,7 +486,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         }
                     }
 
-                    crate::dfu::dfu_clear_busy_if_empty();
                 }
                 _ => {
                     // Not for this peripheral or wrong command type — skip

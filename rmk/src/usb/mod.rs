@@ -31,7 +31,7 @@ use crate::core_traits::Runnable;
 #[cfg(feature = "_dfu")]
 use crate::dfu::DFU_WRITE_ERRORS;
 #[cfg(feature = "_dfu")]
-use crate::dfu::{BLOCK_SIZE_DFU, DFU_BUSY, DfuCmd, dfu_push};
+use crate::dfu::{BLOCK_SIZE_DFU, DFU_CHANNEL, DfuCmd};
 #[cfg(feature = "_dfu")]
 use crate::dfu::MAX_DFU_ALTS;
 #[cfg(feature = "_dfu")]
@@ -288,7 +288,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         self.written = 0;
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
         info!("dfu: DFU download started ({:?})", self.target);
-        dfu_push(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)
+        DFU_CHANNEL.try_send(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Status> {
@@ -301,7 +301,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
         self.written += data.len() as u32;
-        dfu_push(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)
+        DFU_CHANNEL.try_send(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)
     }
 
     fn finish(&mut self) -> Result<(), Status> {
@@ -309,7 +309,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
             DFU_WRITE_ERRORS.store(0, Ordering::Release);
             return Err(Status::ErrWrite);
         }
-        if dfu_push(DfuCmd::Finish(self.target)).is_err() {
+        if DFU_CHANNEL.try_send(DfuCmd::Finish(self.target)).is_err() {
             error!("dfu: DFU command queue full at finish");
             publish_event(DfuStatusEvent::new(DfuStatus::Error));
             return Err(Status::ErrUnknown);
@@ -320,7 +320,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
     }
 
     fn system_reset(&mut self) {
-        let _ = dfu_push(DfuCmd::SystemReset(self.target));
+        let _ = DFU_CHANNEL.try_send(DfuCmd::SystemReset(self.target));
     }
 }
 
@@ -349,7 +349,7 @@ impl Handler for UsbDfuIface {
     }
 
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        if DFU_BUSY.load(Ordering::Acquire) {
+        if !DFU_CHANNEL.is_empty() {
             // Short-circuit: return dfuDNBUSY directly without
             // advancing the DfuState machine. The state stays in
             // DlSync so the next real GETSTATUS (after the queue
