@@ -1,7 +1,6 @@
 //! Initialize flash boilerplate of RMK, including USB or BLE
 //!
 
-use crate::codegen::feature::defines_dfu_partitions;
 #[cfg(feature = "_dfu")]
 use crate::codegen::feature::is_feature_enabled;
 use proc_macro2::TokenStream as TokenStream2;
@@ -383,7 +382,7 @@ fn expand_spi_init(chip_series: &ChipSeries, spi: &SpiConfig) -> TokenStream2 {
 /// partitions are moved in by value and the transport builds its own
 /// USB-side proxy internally.
 pub(crate) fn expand_dfu_interface(dfu: Option<&DfuConfig>) -> TokenStream2 {
-    if !defines_dfu_partitions() {
+    if !cfg!(feature = "_dfu") {
         return quote! {};
     }
     let _ = dfu

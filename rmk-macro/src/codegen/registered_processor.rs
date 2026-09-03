@@ -5,7 +5,6 @@ use rmk_config::resolved::hardware::{ChipModel, PinConfig};
 use syn::ItemMod;
 
 use super::chip::gpio::convert_gpio_str_to_output_pin;
-use crate::codegen::feature::defines_dfu_partitions;
 
 /// Expand processor init/exec blocks from keyboard config.
 /// Returns (initializers, executors).
@@ -20,7 +19,7 @@ pub(crate) fn expand_registered_processor_init(
     initializers.extend(i);
     executors.extend(e);
 
-    if defines_dfu_partitions() {
+    if cfg!(feature = "_dfu") {
         create_dfu_led_processor(hardware, &mut initializers, &mut executors);
     }
 
