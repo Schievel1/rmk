@@ -7,9 +7,9 @@ use core::sync::atomic::Ordering;
 /// covering the entire `.text` + `.rodata` + `.data` sections.
 pub fn read_embedded_firmware_hash() -> u32 {
     use core::sync::atomic::AtomicU32;
-    static CACHED_HASH: AtomicU32 = AtomicU32::new(0);
+    static CACHED_HASH: AtomicU32 = AtomicU32::new(u32::MAX);
     let cached = CACHED_HASH.load(Ordering::Acquire);
-    if cached != 0 {
+    if cached != u32::MAX {
         return cached;
     }
     unsafe extern "C" {

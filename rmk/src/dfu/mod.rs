@@ -40,7 +40,7 @@
 //! └───────────────────────────────────────────────────────────────┘
 //!
 //! ┌─── Peripheral (direct calls, no channel) ──────────────────────┐
-//! │  FlashDfuHandler::write_chunk(offset, data[256])               │
+//! │  FlashDfuHandler::write_chunk(offset, data)                  │
 //! │  FlashDfuHandler::compute_dfu_crc() → FirmwareCrcReport        │
 //! │  mark_updated_and_reset() only on FirmwareCrcOk                │
 //! └─────────────────────────────────────────────────────────────────┘
@@ -235,6 +235,7 @@ pub(crate) enum DfuTarget {
 
 /// A command forwarded from the USB DFU proxy to the async updater task.
 #[cfg(feature = "_dfu")]
+#[derive(Clone)]
 pub(crate) enum DfuCmd {
     Start(DfuTarget),
     /// `Write(target, offset, data)` — offset is the flash byte offset.
@@ -262,11 +263,6 @@ static DFU_STARTED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "dfu_lock")]
 static DFU_UNLOCK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-#[cfg(feature = "dfu_lock")]
-pub fn is_dfu_unlocked() -> bool {
-    !DFU_LOCKED.load(Ordering::Acquire)
-}
-
 /// Gate shared by the transport's DFU start handlers (central alt 0 and the
 /// passthrough slots). Returns `Ok` when a download may proceed and records
 /// that it started; while the keys are locked it wakes the unlock state
@@ -276,7 +272,7 @@ pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::St
     #[cfg(feature = "dfu_lock")]
     {
         use embassy_usb::class::dfu::consts::Status;
-        if !is_dfu_unlocked() {
+        if DFU_LOCKED.load(Ordering::Acquire) {
             DFU_UNLOCK_SIGNAL.signal(());
             info!("dfu_lock: DFU download rejected — keys not unlocked");
             return Err(Status::ErrVendor);
@@ -410,14 +406,6 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
         Ok(())
     }
 
-    /// Check the firmware header (MSP + reset vector) for validity.
-    pub fn check_sanity(&self) -> Result<(), ()> {
-        // Sanity check is done asynchronously in the caller since it
-        // requires flash read access. This method is a placeholder for
-        // the check logic that the caller performs via read_dfu.
-        Ok(())
-    }
-
     async fn check_sanity_from_flash(&self) -> Result<(), ()> {
         let mut dfu = self.dfu_partition.clone();
         let mut hdr = [0u8; 8];
@@ -509,7 +497,6 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
 /// DfuLock state machine that checks a physical key combination to unlock DFU.
 #[cfg(feature = "dfu_lock")]
 pub struct DfuLock<'a> {
-    unlocked: AtomicBool,
     unlock_keys: &'a [(u8, u8)],
     keymap: &'a crate::keymap::KeyMap<'a>,
 }
@@ -518,7 +505,6 @@ pub struct DfuLock<'a> {
 impl<'a> DfuLock<'a> {
     pub fn new(unlock_keys: &'a [(u8, u8)], keymap: &'a crate::keymap::KeyMap<'a>) -> Self {
         Self {
-            unlocked: AtomicBool::new(false),
             unlock_keys,
             keymap,
         }
@@ -537,7 +523,6 @@ impl<'a> DfuLock<'a> {
                 .iter()
                 .all(|(row, col)| self.keymap.read_matrix_key(*row, *col));
             if all_pressed {
-                self.unlocked.store(true, Ordering::Release);
                 DFU_LOCKED.store(false, Ordering::Release);
                 info!("dfu_lock: unlock keys pressed, DFU unlocked for 10 s");
                 publish_event(crate::event::DfuStatusEvent::new(DfuStatus::LockUnlocked));
@@ -562,7 +547,6 @@ impl<'a> DfuLock<'a> {
             if embassy_time::Instant::now() >= deadline {
                 info!("dfu_lock: unlock expired (10 s timeout)");
                 DFU_LOCKED.store(true, Ordering::Release);
-                self.unlocked.store(false, Ordering::Release);
                 publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Idle));
                 break;
             }

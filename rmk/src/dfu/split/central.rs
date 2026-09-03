@@ -3,25 +3,24 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
+use crate::dfu::MAX_DFU_ALTS;
+
 // ---------------------------------------------------------------------------
 // Firmware update data registry
 // ---------------------------------------------------------------------------
 
-/// A reference-counted firmware binary and its pre-computed CRC-32.
+/// A firmware binary reference and its pre-computed CRC-32.
 struct FirmwareSlot {
     data: &'static [u8],
     hash: u32,
 }
-
-/// Maximum number of peripherals with registered firmware.
-const MAX_FW_SLOTS: usize = 4;
 
 /// Global registry: peripheral ID → (`FirmwareSlot`).
 ///
 /// Populated via [`set_firmware_update_data`].
 /// Looked up by [`PeripheralManager`] on
 /// connection to decide whether an update is needed.
-static FW_SLOTS: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<(usize, FirmwareSlot), MAX_FW_SLOTS>>> =
+static FW_SLOTS: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<(usize, FirmwareSlot), MAX_DFU_ALTS>>> =
     Mutex::new(RefCell::new(heapless::Vec::new()));
 
 /// Register a peripheral firmware binary for automatic dfu_split updates.
@@ -36,7 +35,7 @@ static FW_SLOTS: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<(usize, Fi
 /// `id` must be unique; if a slot for the same `id` already exists, it will be replaced.
 /// Every peripheral has only one firmware slot, given by its unique `id`.
 ///
-/// Returns `Err(())` if the registry is full (max `MAX_FW_SLOTS` entries).
+/// Returns `Err(())` if the registry is full (max `MAX_DFU_ALTS` entries).
 pub fn set_firmware_update_data(id: usize, firmware: &'static [u8], hash: u32) -> Result<(), ()> {
     FW_SLOTS.lock(|cell| {
         let slots = &mut cell.borrow_mut();

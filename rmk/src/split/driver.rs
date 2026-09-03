@@ -376,10 +376,10 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     };
 
                     // Split 512B USB block into 256B chunks for the split link
-                    for (chunk_idx, chunk) in data.chunks(256).enumerate() {
-                        let mut buf = [0u8; 256];
+                    for (chunk_idx, chunk) in data.chunks(crate::split::SPLIT_CHUNK_SIZE).enumerate() {
+                        let mut buf = [0u8; crate::split::SPLIT_CHUNK_SIZE];
                         buf[..chunk.len()].copy_from_slice(chunk);
-                        let chunk_offset = base_offset + (chunk_idx * 256) as u32;
+                        let chunk_offset = base_offset + (chunk_idx * crate::split::SPLIT_CHUNK_SIZE) as u32;
                         debug!(
                             "dfu_split: forwarding chunk to peripheral {} @ offset {} ({} bytes)",
                             self.id,
@@ -561,7 +561,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
         self.send_firmware_update(firmware, expected_hash).await;
     }
 
-    /// Send the full firmware binary to the peripheral in 256-byte chunks.
+    /// Send the full firmware binary to the peripheral in SPLIT_CHUNK_SIZE-byte chunks.
     ///
     /// Each chunk is checked with per-chunk CRC-32 verification.  If a
     /// chunk fails (CRC mismatch or timeout) it is retried up to 3 times.
@@ -582,9 +582,9 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             let mut central_crc = crate::crc32::Crc32::new();
             let mut all_acked = true;
 
-            for (offset, chunk) in firmware.chunks(256).enumerate() {
-                let offset_bytes = (offset * 256) as u32;
-                let mut data = [0u8; 256];
+            for (offset, chunk) in firmware.chunks(crate::split::SPLIT_CHUNK_SIZE).enumerate() {
+                let offset_bytes = (offset * crate::split::SPLIT_CHUNK_SIZE) as u32;
+                let mut data = [0u8; crate::split::SPLIT_CHUNK_SIZE];
                 data[..chunk.len()].copy_from_slice(chunk);
                 let chunk_crc = crate::crc32::crc32(&data[..chunk.len()]);
                 central_crc.update(&data[..chunk.len()]);
