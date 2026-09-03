@@ -1,12 +1,9 @@
-use core::cell::RefCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
+use embassy_sync::channel::Channel;
 use embassy_usb::class::dfu::consts::Status;
 use embassy_usb::class::dfu::dfu_mode::{self};
-use heapless;
 use rmk_types::dfu::DfuStatus;
 
 use crate::event::{DfuStatusEvent, publish_event};
@@ -94,7 +91,7 @@ pub fn get_firmware_update_data(id: usize) -> Option<(&'static [u8], u32)> {
 ///        │  passthrough_push(Chunk{offset, data})
 ///        v
 ///   ┌──────────────────────────┐
-///   │     PASSTHROUGH_CMD      │  heapless::Vec<Command, 4>
+///   │     PASSTHROUGH_CHANNEL  │  Channel<CS, Command, 4>
 ///   │  [  Chunk(0)   ]         │  FIFO-queue
 ///   │  [  Chunk(256) ]         │  max 4 entries (QUEUE_SIZE)
 ///   │  [   ...       ]         │  protected by CriticalSectionMutex
@@ -137,7 +134,7 @@ pub fn get_firmware_update_data(id: usize) -> Option<(&'static [u8], u32)> {
 /// central's USB DFU interface.
 ///
 /// Runs inside the USB interrupt.  Each incoming DNLOAD block is split
-/// into 256-byte chunks and pushed into [`PASSTHROUGH_CMD`].  The
+/// into 256-byte chunks and pushed into [`PASSTHROUGH_CHANNEL`].  The
 /// async `PeripheralManager` task drains the queue and forwards chunks
 /// to the peripheral over the split link.  GETSTATUS flow control
 /// (cf. [`PASSTHROUGH_TARGET`]) ensures the host waits when the queue
@@ -194,6 +191,7 @@ impl dfu_mode::Handler for PassthroughDfuHandler {
 }
 
 /// A single chunk of firmware data queued for passthrough.
+#[derive(Clone, Copy)]
 pub(crate) struct PassthroughChunk {
     /// Flash offset where this chunk should be written.
     pub offset: u32,
@@ -206,6 +204,7 @@ pub(crate) struct PassthroughChunk {
 /// Commands flowing from the USB ISR
 /// ([`PassthroughDfuHandler`]) to the async
 /// [`PeripheralManager`](crate::split::driver::PeripheralManager).
+#[derive(Clone)]
 pub(crate) enum PassthroughCommand {
     /// A firmware chunk to be forwarded.
     Chunk(PassthroughChunk),
@@ -217,21 +216,15 @@ pub(crate) enum PassthroughCommand {
 /// Maximum number of pending chunks in the fire-and-forget queue.
 const PASSTHROUGH_QUEUE_SIZE: usize = 4;
 
-/// Fire-and-forget command queue.
-///
-/// The USB DFU handler (ISR context) pushes; the async
-/// `PeripheralManager` pops.  Protected by a critical-section mutex
-/// so it is safe from both contexts.
-static PASSTHROUGH_CMD: Mutex<
-    CriticalSectionRawMutex,
-    RefCell<heapless::Vec<PassthroughCommand, PASSTHROUGH_QUEUE_SIZE>>,
-> = Mutex::new(RefCell::new(heapless::Vec::new()));
-
-/// Wakeup signal: set when a command is pushed to [`PASSTHROUGH_CMD`].
-pub(crate) static PASSTHROUGH_SIGNAL: Signal<CriticalSectionRawMutex, u8> = Signal::new();
+/// Command channel: the USB DFU handler (ISR context) sends; the async
+/// `PeripheralManager` receives.  Uses [`Channel::try_peek`] to inspect
+/// the target without consuming, then [`Channel::try_receive`] only when
+/// the target matches.
+pub(crate) static PASSTHROUGH_CHANNEL: Channel<CriticalSectionRawMutex, PassthroughCommand, PASSTHROUGH_QUEUE_SIZE> =
+    Channel::new();
 
 /// Doorbell atomic: set to a peripheral ID when there is work in
-/// [`PASSTHROUGH_CMD`], `usize::MAX` when idle.
+/// [`PASSTHROUGH_CHANNEL`], `usize::MAX` when idle.
 ///
 /// Read by [`RmkDfuInterface::control_in`] to inject `dfuDNBUSY` into
 /// the GETSTATUS response (adaptive host-side flow control).
@@ -245,17 +238,18 @@ pub(crate) fn passthrough_pending(id: usize) -> bool {
 
 /// Push a command into the queue (ISR-safe).
 fn passthrough_push(cmd: PassthroughCommand) -> Result<(), ()> {
-    PASSTHROUGH_CMD.lock(|c| c.borrow_mut().push(cmd).map_err(|_| ()))?;
-    PASSTHROUGH_SIGNAL.signal(1);
-    Ok(())
+    PASSTHROUGH_CHANNEL.try_send(cmd).map_err(|_| ())
 }
 
-/// Pop the next pending command (async task).
+/// Peek at the next command without consuming it. Returns `None` when empty.
+pub(crate) fn passthrough_peek() -> Option<PassthroughCommand> {
+    PASSTHROUGH_CHANNEL.try_peek().ok()
+}
+
+/// Pop the next pending command (async task). Only call after
+/// [`passthrough_peek`] confirmed the target matches.
 pub(crate) fn passthrough_take_command() -> Option<PassthroughCommand> {
-    PASSTHROUGH_CMD.lock(|c| {
-        let v = &mut *c.borrow_mut();
-        if !v.is_empty() { Some(v.remove(0)) } else { None }
-    })
+    PASSTHROUGH_CHANNEL.try_receive().ok()
 }
 
 /// Clear the target doorbell if the queue is empty.
@@ -264,14 +258,13 @@ pub(crate) fn passthrough_take_command() -> Option<PassthroughCommand> {
 /// items the target stays set, keeping the host in `dfuDNBUSY` until
 /// the PeripheralManager catches up.
 pub(crate) fn passthrough_done_if_empty() {
-    let empty = PASSTHROUGH_CMD.lock(|c| c.borrow().is_empty());
-    if empty {
+    if PASSTHROUGH_CHANNEL.is_empty() {
         PASSTHROUGH_TARGET.store(usize::MAX, Ordering::Release);
     }
 }
 
 /// Drain all pending passthrough commands (e.g. on disconnect).
 pub(crate) fn drain_passthrough() {
-    PASSTHROUGH_CMD.lock(|c| c.borrow_mut().clear());
+    while PASSTHROUGH_CHANNEL.try_receive().is_ok() {}
     PASSTHROUGH_TARGET.store(usize::MAX, Ordering::Release);
 }

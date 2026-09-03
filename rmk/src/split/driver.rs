@@ -254,7 +254,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             };
 
             #[cfg(feature = "dfu_split")]
-            let event_or_signal = select(next_event_to_peri, crate::dfu::PASSTHROUGH_SIGNAL.wait());
+            let event_or_signal = select(next_event_to_peri, crate::dfu::PASSTHROUGH_CHANNEL.ready_to_receive());
             #[cfg(not(feature = "dfu_split"))]
             let event_or_signal = next_event_to_peri;
 
@@ -353,7 +353,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
     /// Process passthrough DFU chunks (fire-and-forget with per-chunk ack).
     ///
     /// Called from the event loop when [`passthrough_pending`] returns
-    /// `true`.  Drains the entire `PASSTHROUGH_CMD` queue, forwarding
+    /// `true`.  Drains the entire `PASSTHROUGH_CHANNEL`, forwarding
     /// each chunk over the split link and waiting for a
     /// `FirmwareChunkAck` before proceeding to the next.
     ///

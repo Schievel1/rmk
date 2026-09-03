@@ -1,6 +1,4 @@
 #[cfg(feature = "_dfu")]
-use core::cell::RefCell;
-#[cfg(feature = "_dfu")]
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "_dfu")]
 use core::sync::atomic::AtomicU32;
@@ -15,10 +13,10 @@ use embassy_boot::{FirmwareState, FirmwareUpdater, FirmwareUpdaterConfig};
 #[cfg(feature = "_dfu")]
 pub use embassy_embedded_hal::flash::partition::Partition;
 #[cfg(feature = "_dfu")]
-use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
-#[cfg(feature = "_dfu")]
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[cfg(feature = "_dfu")]
+use embassy_sync::channel::Channel;
+#[cfg(feature = "dfu_lock")]
 use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::NorFlash;
 #[cfg(feature = "_dfu")]
@@ -164,8 +162,8 @@ mod split;
 pub(crate) use self::split::PassthroughDfuHandler;
 #[cfg(feature = "dfu_split")]
 pub(crate) use self::split::{
-    PASSTHROUGH_SIGNAL, PASSTHROUGH_TARGET, PassthroughCommand, passthrough_done_if_empty, passthrough_pending,
-    passthrough_take_command,
+    PASSTHROUGH_CHANNEL, PASSTHROUGH_TARGET, PassthroughCommand, passthrough_done_if_empty, passthrough_peek,
+    passthrough_pending, passthrough_take_command,
 };
 #[cfg(feature = "dfu_split")]
 pub use self::split::{
@@ -189,16 +187,10 @@ pub(crate) enum DfuCmd {
     SystemReset,
 }
 
-/// Fire-and-forget command queue. The USB DFU proxy (ISR context) pushes; the
-/// [`RmkDfuInterface`] updater task pops. Protected by a critical-section
-/// mutex so it is safe from both contexts.
+/// Command channel: the USB DFU proxy (ISR context) sends via
+/// [`DFU_CHANNEL`]; the [`RmkDfuInterface`] updater task receives.
 #[cfg(feature = "_dfu")]
-pub(crate) static DFU_CMD: BlockingMutex<CriticalSectionRawMutex, RefCell<heapless::Vec<DfuCmd, DFU_CMD_QUEUE_SIZE>>> =
-    BlockingMutex::new(RefCell::new(heapless::Vec::new()));
-
-/// Wakeup signal: set when a command is pushed to [`DFU_CMD`].
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+pub(crate) static DFU_CHANNEL: Channel<CriticalSectionRawMutex, DfuCmd, DFU_CMD_QUEUE_SIZE> = Channel::new();
 
 /// Doorbell atomic: true while the command queue is non-empty. Read by the
 /// transport's GETSTATUS handling to inject `dfuDNBUSY` (adaptive host-side
@@ -212,19 +204,9 @@ pub(crate) static DFU_WRITE_ERRORS: AtomicU32 = AtomicU32::new(0);
 /// Push a command into the queue (ISR-safe). Returns `Err(())` when full.
 #[cfg(feature = "_dfu")]
 pub(crate) fn dfu_push(cmd: DfuCmd) -> Result<(), ()> {
-    DFU_CMD.lock(|c| c.borrow_mut().push(cmd).map_err(|_| ()))?;
+    DFU_CHANNEL.try_send(cmd).map_err(|_| ())?;
     DFU_BUSY.store(true, Ordering::Release);
-    DFU_WAKE.signal(());
     Ok(())
-}
-
-/// Pop the next pending command (async updater task).
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_take() -> Option<DfuCmd> {
-    DFU_CMD.lock(|c| {
-        let v = &mut *c.borrow_mut();
-        if !v.is_empty() { Some(v.remove(0)) } else { None }
-    })
 }
 
 /// Clear the busy flag if the queue has drained.
@@ -233,8 +215,7 @@ pub(crate) fn dfu_take() -> Option<DfuCmd> {
 /// `dfuDNBUSY` until the queue catches up.
 #[cfg(feature = "_dfu")]
 pub(crate) fn dfu_clear_busy_if_empty() {
-    let empty = DFU_CMD.lock(|c| c.borrow().is_empty());
-    if empty {
+    if DFU_CHANNEL.is_empty() {
         DFU_BUSY.store(false, Ordering::Release);
     }
 }
@@ -285,7 +266,7 @@ pub(crate) const MAX_PASSTHROUGH_ALTS: usize = 4;
 /// Flash-side DFU updater.
 ///
 /// Owns the embassy-boot async [`FirmwareUpdater`] and runs as a [`Runnable`]
-/// task. It waits on the command channel ([`DFU_CMD`]) and executes
+/// task. It waits on the command channel ([`DFU_CHANNEL`]) and executes
 /// `start`/`write`/`finish`/`system_reset` on the updater, fully decoupled
 /// from the USB device.
 ///
@@ -328,68 +309,76 @@ impl<DFU: NorFlash, STATE: NorFlash> RmkDfuInterface<DFU, STATE> {
 impl<DFU: NorFlash, STATE: NorFlash> Runnable for RmkDfuInterface<DFU, STATE> {
     async fn run(&mut self) -> ! {
         loop {
-            DFU_WAKE.wait().await;
-            while let Some(cmd) = dfu_take() {
-                match cmd {
-                    DfuCmd::Start => {
-                        self.offset = 0;
-                        self.write_errors = 0;
-                        DFU_WRITE_ERRORS.store(0, Ordering::Release);
-                        match self.updater.get_state().await {
-                            Ok(_) => info!("dfu: state ok"),
-                            Err(_) => error!("dfu: get_state failed"),
-                        }
+            let cmd = DFU_CHANNEL.receive().await;
+            self.handle_cmd(cmd).await;
+            while let Ok(cmd) = DFU_CHANNEL.try_receive() {
+                self.handle_cmd(cmd).await;
+            }
+            dfu_clear_busy_if_empty();
+        }
+    }
+}
+
+#[cfg(feature = "_dfu")]
+impl<DFU: NorFlash, STATE: NorFlash> RmkDfuInterface<DFU, STATE> {
+    async fn handle_cmd(&mut self, cmd: DfuCmd) {
+        match cmd {
+            DfuCmd::Start => {
+                self.offset = 0;
+                self.write_errors = 0;
+                DFU_WRITE_ERRORS.store(0, Ordering::Release);
+                match self.updater.get_state().await {
+                    Ok(_) => info!("dfu: state ok"),
+                    Err(_) => error!("dfu: get_state failed"),
+                }
+            }
+            DfuCmd::Write(data) => match self.updater.write_firmware(self.offset as usize, &data).await {
+                Ok(()) => self.offset += data.len() as u32,
+                Err(_) => {
+                    error!("dfu: firmware write failed");
+                    self.write_errors += 1;
+                    self.offset += data.len() as u32;
+                    DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
+                }
+            },
+            DfuCmd::Finish => {
+                if self.write_errors > 0 {
+                    error!("dfu: update aborted - {} write errors occurred", self.write_errors);
+                    self.write_errors = 0;
+                } else {
+                    info!("dfu: {} bytes written, verifying...", self.offset);
+                    let mut hdr = [0u8; 8];
+                    if self.updater.read_dfu(0, &mut hdr).await.is_ok() {
+                        info!("dfu: DFU[0..8] = {:02x}", hdr);
                     }
-                    DfuCmd::Write(data) => match self.updater.write_firmware(self.offset as usize, &data).await {
-                        Ok(()) => self.offset += data.len() as u32,
-                        Err(_) => {
-                            error!("dfu: firmware write failed");
-                            self.write_errors += 1;
-                            self.offset += data.len() as u32;
-                            DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
+                    let all_ff = hdr.iter().all(|&b| b == 0xFF);
+                    let all_00 = hdr.iter().all(|&b| b == 0x00);
+                    let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                    let reset = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                    if all_ff || all_00 || msp == 0 || msp == 0xFFFF_FFFF || reset == 0 || reset == 0xFFFF_FFFF
+                    {
+                        error!(
+                            "dfu: sanity check failed (msp={:#010x}, reset={:#010x}), skipping mark_updated",
+                            msp, reset
+                        );
+                        self.write_errors += 1;
+                        DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
+                    } else {
+                        match self.updater.mark_updated().await {
+                            Ok(()) => info!("dfu: update complete, resetting"),
+                            Err(_) => error!("dfu: firmware finish failed"),
                         }
-                    },
-                    DfuCmd::Finish => {
-                        if self.write_errors > 0 {
-                            error!("dfu: update aborted - {} write errors occurred", self.write_errors);
-                            self.write_errors = 0;
-                        } else {
-                            info!("dfu: {} bytes written, verifying...", self.offset);
-                            let mut hdr = [0u8; 8];
-                            if self.updater.read_dfu(0, &mut hdr).await.is_ok() {
-                                info!("dfu: DFU[0..8] = {:02x}", hdr);
-                            }
-                            let all_ff = hdr.iter().all(|&b| b == 0xFF);
-                            let all_00 = hdr.iter().all(|&b| b == 0x00);
-                            let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-                            let reset = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-                            if all_ff || all_00 || msp == 0 || msp == 0xFFFF_FFFF || reset == 0 || reset == 0xFFFF_FFFF
-                            {
-                                error!(
-                                    "dfu: sanity check failed (msp={:#010x}, reset={:#010x}), skipping mark_updated",
-                                    msp, reset
-                                );
-                                self.write_errors += 1;
-                                DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
-                            } else {
-                                match self.updater.mark_updated().await {
-                                    Ok(()) => info!("dfu: update complete, resetting"),
-                                    Err(_) => error!("dfu: firmware finish failed"),
-                                }
-                            }
-                        }
-                    }
-                    DfuCmd::SystemReset => {
-                        #[cfg(all(
-                            target_arch = "arm",
-                            target_os = "none",
-                            any(target_abi = "eabi", target_abi = "eabihf")
-                        ))]
-                        cortex_m::peripheral::SCB::sys_reset();
                     }
                 }
             }
-            dfu_clear_busy_if_empty();
+            DfuCmd::SystemReset => {
+                #[cfg(all(
+                    target_arch = "arm",
+                    target_os = "none",
+                    any(target_abi = "eabi", target_abi = "eabihf")
+                ))]
+                cortex_m::peripheral::SCB::sys_reset();
+            }
         }
     }
 }
