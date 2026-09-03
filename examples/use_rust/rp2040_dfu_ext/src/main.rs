@@ -19,7 +19,7 @@ use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, Partition, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashMutex, Partition, FlashDfuHandler, partitions_from_linkerscript};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
@@ -124,7 +124,7 @@ async fn main(_spawner: Spawner) {
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 

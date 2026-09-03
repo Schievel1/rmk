@@ -32,8 +32,8 @@ use crate::core_traits::Runnable;
 use crate::dfu::DFU_WRITE_ERRORS;
 #[cfg(feature = "_dfu")]
 use crate::dfu::{BLOCK_SIZE_DFU, DFU_BUSY, DfuCmd, dfu_push};
-#[cfg(feature = "dfu_split")]
-use crate::dfu::{MAX_PASSTHROUGH_ALTS, PassthroughDfuHandler};
+#[cfg(feature = "_dfu")]
+use crate::dfu::MAX_DFU_ALTS;
 #[cfg(feature = "_dfu")]
 use crate::event::{DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
@@ -265,23 +265,30 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
 // DFU proxy — USB-side alternate settings that forward to the async updater
 // ---------------------------------------------------------------------------
 
-/// Synchronous DFU handler for the device's own alt setting (alt 0).
+/// Synchronous DFU handler for every alternate setting (alt 0 = central,
+/// alt 1..N = split peripherals).
 ///
 /// Runs inside the USB interrupt. It never touches flash: every download
 /// `start`/`write`/`finish`/`system_reset` is forwarded to the async
-/// [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task through the
-/// command channel. The DFU lock gate (if enabled) is checked here so every
-/// DFU start path shares one place.
+/// [`FlashDfuHandler`](crate::dfu::FlashDfuHandler) updater task through
+/// the command channel ([`DFU_CHANNEL`](crate::dfu::DFU_CHANNEL)). The DFU
+/// lock gate (if enabled) is checked here so every DFU start path shares
+/// one place.
 #[cfg(feature = "_dfu")]
-struct UsbProxyDfuHandler;
+struct ProxyUsbDfuHandler {
+    target: crate::dfu::DfuTarget,
+    /// Running byte offset — each `Write` advances by the block size.
+    written: u32,
+}
 
 #[cfg(feature = "_dfu")]
-impl dfu_mode::Handler for UsbProxyDfuHandler {
+impl dfu_mode::Handler for ProxyUsbDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
         crate::dfu::dfu_lock_check()?;
+        self.written = 0;
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
-        info!("dfu: DFU download started (central)");
-        dfu_push(DfuCmd::Start).map_err(|_| Status::ErrUnknown)
+        info!("dfu: DFU download started ({:?})", self.target);
+        dfu_push(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Status> {
@@ -292,7 +299,9 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         let mut buf: heapless::Vec<u8, { BLOCK_SIZE_DFU }> = heapless::Vec::new();
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
-        dfu_push(DfuCmd::Write(buf)).map_err(|_| Status::ErrUnknown)
+        let offset = self.written;
+        self.written += data.len() as u32;
+        dfu_push(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)
     }
 
     fn finish(&mut self) -> Result<(), Status> {
@@ -300,7 +309,7 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
             DFU_WRITE_ERRORS.store(0, Ordering::Release);
             return Err(Status::ErrWrite);
         }
-        if dfu_push(DfuCmd::Finish).is_err() {
+        if dfu_push(DfuCmd::Finish(self.target)).is_err() {
             error!("dfu: DFU command queue full at finish");
             publish_event(DfuStatusEvent::new(DfuStatus::Error));
             return Err(Status::ErrUnknown);
@@ -311,23 +320,21 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
     }
 
     fn system_reset(&mut self) {
-        let _ = dfu_push(DfuCmd::SystemReset);
+        let _ = dfu_push(DfuCmd::SystemReset(self.target));
     }
 }
 
 /// Owner of every DFU alternate setting registered on a single USB interface.
 ///
-/// Alt 0 is the device's own DFU download (forwarded by [`UsbProxyDfuHandler`]
-/// to the async updater); alt 1..N are passthrough slots for split
-/// peripherals (requires `dfu_split`), so a peripheral can be updated over the
-/// central's USB port. Routes by the current alternate setting and injects
-/// adaptive host-side flow control (`dfuDNBUSY`) while the forward queues are
-/// non-empty.
+/// Alt 0 is the device's own DFU download (forwarded by [`ProxyUsbDfuHandler`]
+/// with `DfuTarget::Central` to the async updater); alt 1..N are split
+/// peripheral slots (requires `dfu_split`), forwarded with
+/// `DfuTarget::Peripheral(n)`. Routes by the current alternate setting and
+/// injects adaptive host-side flow control (`dfuDNBUSY`) while the command
+/// queue is non-empty.
 #[cfg(feature = "_dfu")]
 struct UsbDfuIface {
-    central: DfuState<UsbProxyDfuHandler>,
-    #[cfg(feature = "dfu_split")]
-    passthrough: [Option<DfuState<PassthroughDfuHandler>>; MAX_PASSTHROUGH_ALTS],
+    handlers: [Option<DfuState<ProxyUsbDfuHandler>>; MAX_DFU_ALTS],
     current_alt: u8,
 }
 
@@ -338,53 +345,23 @@ impl Handler for UsbDfuIface {
     }
 
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
-        match self.current_alt {
-            0 => self.central.control_out(req, data),
-            #[cfg(feature = "dfu_split")]
-            n => self.passthrough_slot(n)?.control_out(req, data),
-            #[cfg(not(feature = "dfu_split"))]
-            _ => None,
-        }
+        self.handlers[self.current_alt as usize].as_mut()?.control_out(req, data)
     }
 
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        match self.current_alt {
-            0 => {
-                if DFU_BUSY.load(Ordering::Acquire) {
-                    // Short-circuit: return dfuDNBUSY directly without
-                    // advancing the DfuState machine.  The state stays in
-                    // DlSync so the next real GETSTATUS (after the queue
-                    // drains) correctly transitions to Download.
-                    //
-                    // GETSTATUS response: [bStatus, bwPollTimeout LE, bState, iString]
-                    // bwPollTimeout = 0x0A = 10 ms — shorter than the
-                    // default 50 ms so the host detects write completion faster.
-                    buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
-                    return Some(InResponse::Accepted(&buf[0..6]));
-                }
-                self.central.control_in(req, buf)
-            }
-            #[cfg(feature = "dfu_split")]
-            n => {
-                if crate::dfu::PASSTHROUGH_TARGET.load(Ordering::Acquire) != usize::MAX {
-                    // Same short-circuit for passthrough peripherals.
-                    buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
-                    return Some(InResponse::Accepted(&buf[0..6]));
-                }
-                self.passthrough_slot(n)?.control_in(req, buf)
-            }
-            #[cfg(not(feature = "dfu_split"))]
-            _ => None,
+        if DFU_BUSY.load(Ordering::Acquire) {
+            // Short-circuit: return dfuDNBUSY directly without
+            // advancing the DfuState machine. The state stays in
+            // DlSync so the next real GETSTATUS (after the queue
+            // drains) correctly transitions to Download.
+            //
+            // GETSTATUS response: [bStatus, bwPollTimeout LE, bState, iString]
+            // bwPollTimeout = 0x0A = 10 ms — shorter than the
+            // default 50 ms so the host detects write completion faster.
+            buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
+            return Some(InResponse::Accepted(&buf[0..6]));
         }
-    }
-}
-
-#[cfg(feature = "_dfu")]
-impl UsbDfuIface {
-    #[cfg(feature = "dfu_split")]
-    fn passthrough_slot(&mut self, alt: u8) -> Option<&mut DfuState<PassthroughDfuHandler>> {
-        let idx = (alt as usize).saturating_sub(1);
-        self.passthrough.get_mut(idx)?.as_mut()
+        self.handlers[self.current_alt as usize].as_mut()?.control_in(req, buf)
     }
 }
 
@@ -414,10 +391,11 @@ impl Handler for DfuStringProvider {
 /// Register a DFU interface on the USB builder.
 ///
 /// Alt 0 is the device's own DFU download partition; `num_peripherals` more
-/// alts (up to [`MAX_PASSTHROUGH_ALTS`]) become passthrough slots for split
-/// peripherals (requires `dfu_split`). The parked proxy ([`UsbDfuIface`]) does
-/// all routing and never touches flash — downloads flow through the command
-/// channel to the [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task.
+/// alts (up to [`MAX_DFU_ALTS`](crate::dfu::MAX_DFU_ALTS)) become split
+/// peripheral slots (requires `dfu_split`). The parked proxy ([`UsbDfuIface`])
+/// does all routing and never touches flash — downloads flow through the
+/// command channel to the [`FlashDfuHandler`](crate::dfu::FlashDfuHandler)
+/// updater task.
 #[cfg(feature = "_dfu")]
 fn register_dfu_iface<D: Driver<'static>>(
     builder: &mut Builder<'static, D>,
@@ -444,9 +422,9 @@ fn register_dfu_iface<D: Driver<'static>>(
     );
 
     #[cfg(feature = "dfu_split")]
-    let num_passthrough = num_peripherals.min(MAX_PASSTHROUGH_ALTS);
+    let num_split = num_peripherals.min(MAX_DFU_ALTS - 1);
     #[cfg(feature = "dfu_split")]
-    for _ in 0..num_passthrough {
+    for _ in 0..num_split {
         let mut alt = iface.alt_setting(0xFE, 0x01, 0x02, Some(string_idx));
         alt.descriptor(
             0x21,
@@ -465,16 +443,18 @@ fn register_dfu_iface<D: Driver<'static>>(
 
     static DFU_IFACE: StaticCell<UsbDfuIface> = StaticCell::new();
     let dfu_iface = DFU_IFACE.init(UsbDfuIface {
-        central: DfuState::new(UsbProxyDfuHandler, central_attrs),
-        #[cfg(feature = "dfu_split")]
-        passthrough: {
-            let mut slots: [Option<DfuState<PassthroughDfuHandler>>; MAX_PASSTHROUGH_ALTS] = Default::default();
-            for id in 0..num_passthrough {
-                slots[id] = Some(DfuState::new(
-                    PassthroughDfuHandler {
-                        target_id: id,
-                        written: 0,
-                    },
+        handlers: {
+            let mut slots: [Option<DfuState<ProxyUsbDfuHandler>>; MAX_DFU_ALTS] = Default::default();
+            // Alt 0: central
+            slots[0] = Some(DfuState::new(
+                ProxyUsbDfuHandler { target: crate::dfu::DfuTarget::Central, written: 0 },
+                central_attrs,
+            ));
+            // Alt 1..N: split peripherals
+            #[cfg(feature = "dfu_split")]
+            for id in 0..num_split {
+                slots[id + 1] = Some(DfuState::new(
+                    ProxyUsbDfuHandler { target: crate::dfu::DfuTarget::Peripheral(id as u8), written: 0 },
                     DfuAttributes::CAN_DOWNLOAD,
                 ));
             }

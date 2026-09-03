@@ -374,7 +374,7 @@ fn expand_spi_init(chip_series: &ChipSeries, spi: &SpiConfig) -> TokenStream2 {
 }
 
 /// Generate the `dfu_iface` updater (`let mut dfu_iface =
-/// ::rmk::dfu::RmkDfuInterface::new(dfu_partition, state_partition)`) for the
+/// ::rmk::dfu::FlashDfuHandler::new(dfu_partition, state_partition)`) for the
 /// current board.
 ///
 /// The updater is a [`Runnable`](::rmk::core_traits::Runnable) that runs in
@@ -389,6 +389,6 @@ pub(crate) fn expand_dfu_interface(dfu: Option<&DfuConfig>) -> TokenStream2 {
         .expect("[dfu] section is required in keyboard.toml (or chip default) when dfu is enabled");
 
     quote! {
-        let mut dfu_iface = ::rmk::dfu::RmkDfuInterface::new(dfu_partition, state_partition);
+        let mut dfu_iface = ::rmk::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
     }
 }

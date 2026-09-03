@@ -62,7 +62,7 @@ pub async fn run_rmk_split_peripheral<
         let mut peripheral = SplitPeripheral::new(SerialSplitDriver::new(serial));
 
         #[cfg(all(feature = "dfu_split", not(feature = "_ble")))]
-        let mut dfu_handler = crate::dfu::SplitDfuHandler::new(dfu_partition, state_partition);
+        let mut dfu_handler = crate::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
 
         loop {
             peripheral
@@ -104,7 +104,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
         #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] STATE: NorFlash + Clone,
     >(
         &mut self,
-        #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] dfu_handler: &mut crate::dfu::SplitDfuHandler<
+        #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] dfu_handler: &mut crate::dfu::FlashDfuHandler<
             DFU,
             STATE,
         >,
