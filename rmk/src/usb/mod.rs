@@ -350,27 +350,28 @@ impl Handler for UsbDfuIface {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         match self.current_alt {
             0 => {
-                // ── Flow control: dfuDNBUSY override ────────────────────────
-                // Byte 4 of the 6-byte GETSTATUS response is the DFU state.
-                // While the updater queue is non-empty we override it with
-                // 4 (= dfuDNBUSY) so the host polls again after 50 ms instead
-                // of queueing more 512B blocks. The store is volatile because
-                // `buf` is still borrowed by `resp`.
-                let buf_ptr = buf.as_mut_ptr();
-                let resp = self.central.control_in(req, buf);
-                if resp.is_some() && DFU_BUSY.load(Ordering::Acquire) {
-                    unsafe { core::ptr::write_volatile(buf_ptr.add(4), 4u8) };
+                if DFU_BUSY.load(Ordering::Acquire) {
+                    // Short-circuit: return dfuDNBUSY directly without
+                    // advancing the DfuState machine.  The state stays in
+                    // DlSync so the next real GETSTATUS (after the queue
+                    // drains) correctly transitions to Download.
+                    //
+                    // GETSTATUS response: [bStatus, bwPollTimeout LE, bState, iString]
+                    // bwPollTimeout = 0x0A = 10 ms — shorter than the
+                    // default 50 ms so the host detects write completion faster.
+                    buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
+                    return Some(InResponse::Accepted(&buf[0..6]));
                 }
-                resp
+                self.central.control_in(req, buf)
             }
             #[cfg(feature = "dfu_split")]
             n => {
-                let buf_ptr = buf.as_mut_ptr();
-                let resp = self.passthrough_slot(n)?.control_in(req, buf);
-                if resp.is_some() && crate::dfu::PASSTHROUGH_TARGET.load(Ordering::Acquire) != usize::MAX {
-                    unsafe { core::ptr::write_volatile(buf_ptr.add(4), 4u8) };
+                if crate::dfu::PASSTHROUGH_TARGET.load(Ordering::Acquire) != usize::MAX {
+                    // Same short-circuit for passthrough peripherals.
+                    buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
+                    return Some(InResponse::Accepted(&buf[0..6]));
                 }
-                resp
+                self.passthrough_slot(n)?.control_in(req, buf)
             }
             #[cfg(not(feature = "dfu_split"))]
             _ => None,
