@@ -92,8 +92,6 @@ pub const FLASH_SIZE: usize = 16 * 1024 * 1024;
 /// the largest `WRITE_SIZE` among all supported flash types (RP2040 internal
 /// flash and 25-series SPI NOR: 1; nRF NVMC: 4). The buffer is sliced to the
 /// state partition's exact `WRITE_SIZE` before being handed to embassy-boot.
-#[cfg(feature = "_dfu")]
-pub const DFU_WRITE_SIZE: usize = 256;
 
 /// Block size of a DFU download transferred per USB control request.
 /// Larger values speed up firmware downloads. Must match the USB control
@@ -101,7 +99,6 @@ pub const DFU_WRITE_SIZE: usize = 256;
 pub const BLOCK_SIZE_DFU: usize = 512;
 
 /// Partition layout read from the DFU symbols in `memory.x`.
-///
 /// The offsets are flash-relative and come from the `__bootloader_*` symbols
 /// that rmk-boot's generated `memory.x` provides.
 #[cfg(feature = "_dfu")]
@@ -192,10 +189,18 @@ pub fn partitions_from_linkerscript<'a, F: NorFlash>(
 ///
 /// Must be called *after* the firmware is confirmed running, before the
 /// bootloader's timeout would consider the update failed.
+///
+/// This is a free public function because some bootloaders provide DFU with
+/// swap functionality outside of RMK. In this case users do not have a
+/// `FlashDfuHandler` but they still need to be able to call mark their
+/// firmware sucessfully booted.
 #[cfg(feature = "_dfu")]
 pub async fn mark_booted<STATE: NorFlash>(state: &mut STATE) {
-    static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
-    let mut firmware_state = FirmwareState::new(state, &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE]);
+    // 16 bytes is enough for all supported flash types (RP2040: 1, nRF: 4).
+    // If a new flash type has WRITE_SIZE > 16, this buffer must be enlarged.
+    static ALIGNED: StaticCell<[u8; 16]> = StaticCell::new();
+    let mut firmware_state =
+        FirmwareState::new(state, &mut ALIGNED.init([0; 16])[..STATE::WRITE_SIZE]);
     firmware_state.mark_booted().await.ok();
 }
 
@@ -384,9 +389,25 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
 
     /// Mark the new firmware as valid and reset into it.
     ///
-    /// Delegates to the free function [`mark_updated_and_reset`].
+    /// Writes the swap magic bytes to the state partition via embassy-boot's
+    /// [`FirmwareState`] and then performs a system reset. The bootloader will
+    /// copy the DFU slot to the active slot on the next boot.
     pub async fn mark_updated_and_reset(&mut self) -> Result<(), ()> {
-        mark_updated_and_reset(&mut self.state_partition).await
+        // 16 bytes is enough for all supported flash types (RP2040: 1, nRF: 4).
+        // If a new flash type has WRITE_SIZE > 16, this buffer must be enlarged.
+        static ALIGNED: StaticCell<[u8; 16]> = StaticCell::new();
+        let mut firmware_state =
+            FirmwareState::new(&mut self.state_partition, &mut ALIGNED.init([0; 16])[..STATE::WRITE_SIZE]);
+        firmware_state.mark_updated().await.map_err(|_| ())?;
+        publish_event(DfuStatusEvent::new(DfuStatus::Finished));
+        #[cfg(all(
+            target_arch = "arm",
+            target_os = "none",
+            any(target_abi = "eabi", target_abi = "eabihf")
+        ))]
+        cortex_m::peripheral::SCB::sys_reset();
+        #[allow(unreachable_code)]
+        Ok(())
     }
 
     /// Check the firmware header (MSP + reset vector) for validity.
@@ -415,31 +436,6 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
         }
         Ok(())
     }
-}
-
-/// Mark the new firmware as valid and reset into it.
-///
-/// Writes the swap magic bytes to the state partition via embassy-boot's
-/// [`FirmwareState`] and then performs a system reset. The bootloader will
-/// copy the DFU slot to the active slot on the next boot.
-///
-/// This is a free function (not a method) because some bootloaders call
-/// it without having a `FlashDfuHandler` instance.
-#[cfg(feature = "_dfu")]
-pub async fn mark_updated_and_reset<STATE: NorFlash>(state_partition: &mut STATE) -> Result<(), ()> {
-    static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
-    let mut firmware_state =
-        FirmwareState::new(state_partition, &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE]);
-    firmware_state.mark_updated().await.map_err(|_| ())?;
-    publish_event(DfuStatusEvent::new(DfuStatus::Finished));
-    #[cfg(all(
-        target_arch = "arm",
-        target_os = "none",
-        any(target_abi = "eabi", target_abi = "eabihf")
-    ))]
-    cortex_m::peripheral::SCB::sys_reset();
-    #[allow(unreachable_code)]
-    Ok(())
 }
 
 #[cfg(feature = "_dfu")]
@@ -485,7 +481,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
                         self.write_errors += 1;
                         DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
                     } else {
-                        match mark_updated_and_reset(&mut self.state_partition).await {
+                        match self.mark_updated_and_reset().await {
                             Ok(()) => info!("dfu: update complete, resetting"),
                             Err(()) => error!("dfu: firmware finish failed"),
                         }
