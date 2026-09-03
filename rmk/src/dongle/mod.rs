@@ -43,7 +43,9 @@ use crate::ble::wait_for_stack_started;
 use crate::channel::send_hid_report;
 use crate::core_traits::Runnable;
 use crate::dongle::event::{DONGLE_EVENT_CHAR_UUID, DONGLE_EVENT_SERVICE_UUID, DongleEvent};
-use crate::event::{EventSubscriber, LedIndicatorEvent, SubscribableEvent, publish_event};
+use crate::event::{
+    DongleState, DongleStateEvent, EventSubscriber, LedIndicatorEvent, SubscribableEvent, publish_event,
+};
 use crate::hid::{KeyboardReport, Report};
 use crate::{DONGLE_PAIRING_WINDOW_SECS, RawMutex};
 
@@ -170,6 +172,7 @@ where
             scan: &scan,
             router: self.router,
             profiles: ProfileManager::new(stack),
+            state: Cell::new(DongleState::default()),
         };
 
         join(crate::ble::ble_task(stack.runner(), &scan), central.run()).await;
@@ -184,6 +187,8 @@ struct DongleCentral<'b, 's: 'b, C: Controller + ControllerCmdAsync<LeSetPhy>> {
     scan: &'b ScanHandler,
     router: &'b DongleRouter,
     profiles: ProfileManager<'b, 's, C, DefaultPacketPool, 1>,
+    /// The last state published, so a path that ends where it began says nothing.
+    state: Cell<DongleState>,
 }
 
 impl<'b, 's: 'b, C> DongleCentral<'b, 's, C>
@@ -193,6 +198,13 @@ where
         + ControllerCmdSync<LeReadLocalSupportedFeatures>
         + ControllerCmdSync<LeSetScanParams>,
 {
+    /// Publish current `DongleState` if it is a change.
+    fn set_state(&self, state: DongleState) {
+        if self.state.replace(state) != state {
+            publish_event(DongleStateEvent(state));
+        }
+    }
+
     async fn run(&mut self) -> ! {
         wait_for_stack_started().await;
         self.profiles.load_bonded_devices().await;
@@ -214,6 +226,7 @@ where
             self.scan.bonded_addr.lock(|a| a.set(bonded.map(|addr| addr.addr)));
 
             if let Some(addr) = bonded {
+                self.set_state(DongleState::Searching);
                 // Connect only once the keyboard asks for the dongle; its bare address
                 // would match its host advertising too. The accept list drops other traffic.
                 self.scan.bonded_asked.reset();
@@ -267,6 +280,7 @@ where
     /// user before the (re)plug — that beats the automatic reconnect.
     async fn run_pairing_window(&self) -> Option<(AddrKind, BdAddr)> {
         info!("[dongle] pairing window open for {}s", DONGLE_PAIRING_WINDOW_SECS);
+        self.set_state(DongleState::Pairing);
         self.scan.seeking_keyboard.reset();
         self.scan.bonded_seen.reset();
         let deadline = Instant::now() + Duration::from_secs(DONGLE_PAIRING_WINDOW_SECS as u64);
@@ -417,6 +431,7 @@ where
         let mut listener = client.listen_all().ok()?;
 
         self.router.link_up();
+        self.set_state(DongleState::Connected);
         info!("[dongle] relaying");
         self.relay(
             #[cfg(not(feature = "vial"))]
