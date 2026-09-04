@@ -515,7 +515,7 @@ impl<'a> Keyboard<'a> {
                                 self.process_key_action_normal(action, held_key.event).await;
                                 held_key.state = KeyState::ProcessedButReleaseNotReportedYet(action);
                                 // Push back after triggered tap
-                                self.held_buffer.push_without_sort(held_key);
+                                self.held_buffer.push(held_key);
                             }
                             KeyState::Released(pattern) => {
                                 // In this state pattern is not surely finished,
@@ -554,7 +554,7 @@ impl<'a> Keyboard<'a> {
                                     self.process_key_action_normal(action, held_key.event).await;
                                     held_key.state = KeyState::ProcessedButReleaseNotReportedYet(action);
                                     // Push back after triggered hold
-                                    self.held_buffer.push_without_sort(held_key);
+                                    self.held_buffer.push(held_key);
                                 }
                                 KeyState::Released(pattern) => {
                                     debug!("pattern after released, permissive hold: {:?}", pattern);
@@ -627,7 +627,7 @@ impl<'a> Keyboard<'a> {
                                 _ => {} // For morse, the releasing will not be processed immediately, so just ignore it
                             }
                             // Push back after triggered hold
-                            self.held_buffer.push_without_sort(held_key);
+                            self.held_buffer.push(held_key);
                         }
                     }
 
