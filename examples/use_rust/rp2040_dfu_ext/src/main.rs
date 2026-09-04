@@ -19,7 +19,7 @@ use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, Partition, FlashDfuHandler, partitions_from_linkerscript};
+use rmk::dfu::{FlashDfuHandler, FlashMutex, Partition, partitions_from_linkerscript};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;

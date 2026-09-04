@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use crate::dfu::MAX_DFU_ALTS;
 

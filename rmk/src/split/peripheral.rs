@@ -261,6 +261,11 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                                 dfu_handler.mark_updated_and_reset().await.ok();
                             }
                         }
+                        #[cfg(feature = "dfu_split")]
+                        SplitMessage::SystemReset => {
+                            info!("dfu_split: received system reset from central");
+                            cortex_m::peripheral::SCB::sys_reset();
+                        }
                         _ => (),
                     },
                     Err(e) => {

@@ -260,8 +260,21 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             };
 
             #[cfg(feature = "dfu_split")]
-            let event_or_signal =
-                select(next_event_to_peri, crate::dfu::DFU_PERIPH_SIGNALS[self.id as usize].wait()).fuse();
+            let event_or_signal = if (self.id as usize) < crate::dfu::MAX_DFU_ALTS {
+                select(
+                    next_event_to_peri,
+                    crate::dfu::DFU_PERIPH_SIGNALS[self.id as usize].wait(),
+                )
+                .fuse()
+            } else {
+                // Too many peripherals for DFU signal array — use a static
+                // never-resolving signal so both branches share the same type.
+                static DUMMY_SIGNAL: embassy_sync::signal::Signal<
+                    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                    (),
+                > = embassy_sync::signal::Signal::new();
+                select(next_event_to_peri, DUMMY_SIGNAL.wait()).fuse()
+            };
             #[cfg(not(feature = "dfu_split"))]
             let event_or_signal = next_event_to_peri;
 
@@ -379,65 +392,108 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
         let mut consumed = false;
         while let Ok(cmd) = crate::dfu::DFU_CHANNEL.try_peek() {
             match cmd {
-                crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::Peripheral(id))
-                    if id == self.id as u8 =>
-                {
+                crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
                     consumed = true;
                     let _ = crate::dfu::DFU_CHANNEL.try_receive();
                     self.passthrough_crc = crate::crc32::Crc32::new();
                     info!("dfu_split: DFU download started for peripheral {}", self.id);
                 }
-                crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::Peripheral(id), _, _)
-                    if id == self.id as u8 =>
-                {
+                crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::Peripheral(id), _, _) if id == self.id as u8 => {
                     consumed = true;
                     // Consume the message (borrow from peek is dropped)
-                    let crate::dfu::DfuCmd::Write(_, base_offset, data) =
-                        crate::dfu::DFU_CHANNEL.try_receive().expect("peeked but receive failed")
+                    let crate::dfu::DfuCmd::Write(_, base_offset, data) = crate::dfu::DFU_CHANNEL
+                        .try_receive()
+                        .expect("peeked but receive failed")
                     else {
                         unreachable!()
                     };
 
                     // Split 512B USB block into 256B chunks for the split link
+                    const MAX_RETRIES: u32 = 3;
                     for (chunk_idx, chunk) in data.chunks(crate::split::SPLIT_CHUNK_SIZE).enumerate() {
                         let mut buf = [0u8; crate::split::SPLIT_CHUNK_SIZE];
                         buf[..chunk.len()].copy_from_slice(chunk);
                         let chunk_offset = base_offset + (chunk_idx * crate::split::SPLIT_CHUNK_SIZE) as u32;
-                        debug!(
-                            "dfu_split: forwarding chunk to peripheral {} @ offset {} ({} bytes)",
-                            self.id,
-                            chunk_offset,
-                            chunk.len()
-                        );
+                        let chunk_crc = crate::crc32::crc32(&buf[..chunk.len()]);
                         self.passthrough_crc.update(&buf[..chunk.len()]);
-                        let msg = SplitMessage::FirmwareChunk {
-                            offset: chunk_offset,
-                            len: chunk.len() as u16,
-                            data: super::FirmwareChunkData(buf),
-                        };
-                        if self.send(&msg).await.is_err() {
-                            error!("dfu_split: disconnected during chunk send");
+
+                        let mut retries = 0;
+                        let mut acked = false;
+
+                        while !acked && retries < MAX_RETRIES {
+                            if retries > 0 {
+                                info!(
+                                    "dfu_split: retry {}/{} for chunk at offset {}",
+                                    retries + 1,
+                                    MAX_RETRIES,
+                                    chunk_offset
+                                );
+                            }
+
+                            debug!(
+                                "dfu_split: forwarding chunk to peripheral {} @ offset {} ({} bytes)",
+                                self.id,
+                                chunk_offset,
+                                chunk.len()
+                            );
+
+                            let msg = SplitMessage::FirmwareChunk {
+                                offset: chunk_offset,
+                                len: chunk.len() as u16,
+                                data: super::FirmwareChunkData(buf),
+                            };
+                            if self.send(&msg).await.is_err() {
+                                error!("dfu_split: disconnected during chunk send");
+                                return true;
+                            }
+
+                            // Wait for the peripheral to acknowledge this chunk
+                            let deadline = Instant::now() + Duration::from_secs(2);
+                            let got = loop {
+                                match select(self.transceiver.read(), Timer::at(deadline)).await {
+                                    Either::First(Ok(SplitMessage::FirmwareChunkAck {
+                                        offset: ack_offset,
+                                        crc: ack_crc,
+                                    })) => {
+                                        if ack_offset == chunk_offset {
+                                            if ack_crc == chunk_crc {
+                                                break true;
+                                            }
+                                            warn!(
+                                                "dfu_split: per-chunk CRC mismatch at offset {} (peripheral={:#010x}, central={:#010x})",
+                                                chunk_offset, ack_crc, chunk_crc
+                                            );
+                                            break false;
+                                        }
+                                        info!(
+                                            "dfu_split: got ack for offset {}, waiting for {}",
+                                            ack_offset, chunk_offset
+                                        );
+                                    }
+                                    Either::First(Ok(_)) => {}
+                                    Either::First(Err(e)) => {
+                                        error!("dfu_split: read error: {:?}", e);
+                                        break false;
+                                    }
+                                    Either::Second(_) => {
+                                        error!("dfu_split: timeout waiting for chunk ack");
+                                        break false;
+                                    }
+                                }
+                            };
+                            acked = got;
+                            retries += 1;
+                        }
+
+                        if !acked {
+                            error!(
+                                "dfu_split: chunk at offset {} failed after {} retries",
+                                chunk_offset, MAX_RETRIES
+                            );
+                            publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                             return true;
                         }
-
-                        // Wait for the peripheral to acknowledge this chunk
-                        let deadline = Instant::now() + Duration::from_secs(2);
-                        loop {
-                            match select(self.transceiver.read(), Timer::at(deadline)).await {
-                                Either::First(Ok(SplitMessage::FirmwareChunkAck { .. })) => break,
-                                Either::First(Ok(_)) => {}
-                                Either::First(Err(e)) => {
-                                    error!("dfu_split: read error: {:?}", e);
-                                    break;
-                                }
-                                Either::Second(_) => {
-                                    error!("dfu_split: timeout waiting for chunk ack");
-                                    break;
-                                }
-                            }
-                        }
                     }
-
                 }
                 crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
                     // Consume the message
@@ -470,6 +526,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     let Some(peripheral_crc) = crc else {
                         error!("dfu_split: CRC verification failed");
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
+                        publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                         return true;
                     };
 
@@ -482,6 +539,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             central_crc, peripheral_crc
                         );
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
+                        publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                         return true;
                     }
 
@@ -496,6 +554,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         match select(self.transceiver.read(), Timer::at(deadline)).await {
                             Either::First(Ok(SplitMessage::FirmwareUpdateConfirm)) => {
                                 info!("dfu_split: peripheral confirmed, update complete");
+                                publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Finished));
                                 break;
                             }
                             Either::First(Ok(_)) => {}
@@ -509,7 +568,14 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             }
                         }
                     }
-
+                }
+                crate::dfu::DfuCmd::SystemReset(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+                    let _ = crate::dfu::DFU_CHANNEL.try_receive();
+                    info!("dfu_split: forwarding system reset to peripheral {}", self.id);
+                    if self.send(&SplitMessage::SystemReset).await.is_err() {
+                        error!("dfu_split: disconnected during system reset");
+                    }
+                    return true;
                 }
                 _ => {
                     // Not for this peripheral or wrong command type — skip
@@ -748,5 +814,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
         }
 
         error!("dfu_split: all {} update attempts failed", MAX_ATTEMPTS);
+        publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
     }
 }

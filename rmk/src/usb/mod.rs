@@ -13,7 +13,9 @@ use embassy_usb::class::dfu::dfu_mode::{self, DfuState};
 use embassy_usb::class::hid::{HidProtocolMode, HidReader, HidReaderWriter, HidWriter, ReportId, RequestHandler};
 use embassy_usb::control::OutResponse;
 #[cfg(feature = "_dfu")]
-use embassy_usb::control::{InResponse, Request};
+use embassy_usb::control::{InResponse, Recipient, Request, RequestType};
+#[cfg(feature = "_dfu")]
+use embassy_usb::driver::Direction;
 use embassy_usb::driver::{Driver, EndpointError};
 #[cfg(feature = "_dfu")]
 use embassy_usb::types::{InterfaceNumber, StringIndex};
@@ -31,9 +33,9 @@ use crate::core_traits::Runnable;
 #[cfg(feature = "_dfu")]
 use crate::dfu::DFU_WRITE_ERRORS;
 #[cfg(feature = "_dfu")]
-use crate::dfu::{BLOCK_SIZE_DFU, DFU_CHANNEL, DfuCmd};
-#[cfg(feature = "_dfu")]
 use crate::dfu::MAX_DFU_ALTS;
+#[cfg(feature = "_dfu")]
+use crate::dfu::{BLOCK_SIZE_DFU, DFU_CHANNEL, DfuCmd};
 #[cfg(feature = "_dfu")]
 use crate::event::{DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
@@ -281,7 +283,7 @@ struct ProxyUsbDfuHandler {
     written: u32,
 }
 
-#[cfg(feature = "_dfu")]
+#[cfg(feature = "dfu_split")]
 impl ProxyUsbDfuHandler {
     fn signal_peripheral(&self) {
         if let crate::dfu::DfuTarget::Peripheral(id) = self.target {
@@ -290,14 +292,22 @@ impl ProxyUsbDfuHandler {
     }
 }
 
+#[cfg(all(feature = "_dfu", not(feature = "dfu_split")))]
+impl ProxyUsbDfuHandler {
+    fn signal_peripheral(&self) {}
+}
+
 #[cfg(feature = "_dfu")]
 impl dfu_mode::Handler for ProxyUsbDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
-        crate::dfu::dfu_lock_check()?;
+        let guard = crate::dfu::dfu_lock_check()?;
         self.written = 0;
-        publish_event(DfuStatusEvent::new(DfuStatus::Started));
         info!("dfu: DFU download started ({:?})", self.target);
-        DFU_CHANNEL.try_send(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)?;
+        DFU_CHANNEL
+            .try_send(DfuCmd::Start(self.target))
+            .map_err(|_| Status::ErrUnknown)?;
+        guard.mark_started();
+        publish_event(DfuStatusEvent::new(DfuStatus::Started));
         self.signal_peripheral();
         Ok(())
     }
@@ -307,12 +317,14 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
             DFU_WRITE_ERRORS.store(0, Ordering::Release);
             return Err(Status::ErrWrite);
         }
-        publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         let mut buf: heapless::Vec<u8, { BLOCK_SIZE_DFU }> = heapless::Vec::new();
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
         self.written += data.len() as u32;
-        DFU_CHANNEL.try_send(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)?;
+        DFU_CHANNEL
+            .try_send(DfuCmd::Write(self.target, offset, buf))
+            .map_err(|_| Status::ErrUnknown)?;
+        publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         self.signal_peripheral();
         Ok(())
     }
@@ -334,7 +346,11 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
     }
 
     fn system_reset(&mut self) {
-        let _ = DFU_CHANNEL.try_send(DfuCmd::SystemReset(self.target));
+        if DFU_CHANNEL.try_send(DfuCmd::SystemReset(self.target)).is_err() {
+            error!("dfu: DFU command queue full at system_reset");
+            publish_event(DfuStatusEvent::new(DfuStatus::Error));
+            return;
+        }
         self.signal_peripheral();
     }
 }
@@ -356,23 +372,48 @@ struct UsbDfuIface {
 #[cfg(feature = "_dfu")]
 impl Handler for UsbDfuIface {
     fn set_alternate_setting(&mut self, _iface: InterfaceNumber, alternate_setting: u8) {
-        self.current_alt = alternate_setting;
+        self.current_alt = alternate_setting.min(self.handlers.len() as u8 - 1);
     }
 
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
-        self.handlers[self.current_alt as usize].as_mut()?.control_out(req, data)
+        let alt = self.current_alt as usize;
+        // DFU_DNLOAD = 1. When block 0 arrives with data, it starts a new
+        // download session. If the DfuState machine is stale from a previous
+        // session (next_block_num > 0), the block-num check will reject it.
+        // Inject a DFU_CLRSTATUS (request 4) first to reset next_block_num
+        // and state to DfuIdle.  ClrStatus on an already-idle machine is a
+        // harmless no-op.
+        if req.request == 1 && req.value == 0 && !data.is_empty() {
+            if let Some(handler) = self.handlers[alt].as_mut() {
+                handler.control_out(
+                    Request {
+                        direction: Direction::Out,
+                        request_type: RequestType::Class,
+                        recipient: Recipient::Interface,
+                        request: 4,
+                        value: 0,
+                        index: self.current_alt as u16,
+                        length: 0,
+                    },
+                    &[],
+                );
+            }
+        }
+        self.handlers[alt].as_mut()?.control_out(req, data)
     }
 
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        if !DFU_CHANNEL.is_empty() {
+        if !DFU_CHANNEL.is_empty() && req.request == 3 {
             // Short-circuit: return dfuDNBUSY directly without
             // advancing the DfuState machine. The state stays in
             // DlSync so the next real GETSTATUS (after the queue
             // drains) correctly transitions to Download.
             //
-            // GETSTATUS response: [bStatus, bwPollTimeout LE, bState, iString]
-            // bwPollTimeout = 0x0A = 10 ms — shorter than the
-            // default 50 ms so the host detects write completion faster.
+            // GETSTATUS response layout: [bStatus, bwPollTimeout LE, bState, iString]
+            //   [0] = 0x00 = dfuOK
+            //   [1..3] = 0x0A, 0x00 = 10 ms poll timeout (LE)
+            //   [4] = 4 = iString index (unused, required by DFU spec)
+            //   [5] = 0x00 = padding
             buf[0..6].copy_from_slice(&[0x00, 0x0A, 0x00, 0x00, 4u8, 0x00]);
             return Some(InResponse::Accepted(&buf[0..6]));
         }
@@ -462,14 +503,20 @@ fn register_dfu_iface<D: Driver<'static>>(
             let mut slots: [Option<DfuState<ProxyUsbDfuHandler>>; MAX_DFU_ALTS] = Default::default();
             // Alt 0: central
             slots[0] = Some(DfuState::new(
-                ProxyUsbDfuHandler { target: crate::dfu::DfuTarget::Central, written: 0 },
+                ProxyUsbDfuHandler {
+                    target: crate::dfu::DfuTarget::Central,
+                    written: 0,
+                },
                 central_attrs,
             ));
             // Alt 1..N: split peripherals
             #[cfg(feature = "dfu_split")]
             for id in 0..num_split {
                 slots[id + 1] = Some(DfuState::new(
-                    ProxyUsbDfuHandler { target: crate::dfu::DfuTarget::Peripheral(id as u8), written: 0 },
+                    ProxyUsbDfuHandler {
+                        target: crate::dfu::DfuTarget::Peripheral(id as u8),
+                        written: 0,
+                    },
                     DfuAttributes::CAN_DOWNLOAD,
                 ));
             }

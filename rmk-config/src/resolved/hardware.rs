@@ -25,7 +25,6 @@ pub struct Storage {
 
 /// Resolved DFU partition config
 pub struct DfuConfig {
-    pub page_size: u32,
     pub led: Option<PinConfig>,
     pub unlock_keys: Vec<[u8; 2]>,
     pub external_flash: Option<ExternalFlashConfig>,
@@ -132,7 +131,6 @@ impl crate::KeyboardTomlConfig {
                     None
                 };
                 Ok(Some(DfuConfig {
-                    page_size: d.page_size.unwrap_or(4096),
                     led: d.led.clone().map(|pin| PinConfig { pin, low_active: false }),
                     unlock_keys,
                     external_flash,

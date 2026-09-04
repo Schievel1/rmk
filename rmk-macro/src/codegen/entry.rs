@@ -201,8 +201,8 @@ pub(crate) fn rmk_entry_select(
                             let rmk_features = get_rmk_features();
                             let dfu_split_enabled = is_feature_enabled(&rmk_features, "dfu_split");
                             let policy = if dfu_split_enabled {
-                                match p.update_policy.as_deref() {
-                                    Some("force") => {
+                                match p.update_policy {
+                                    Some(rmk_config::UpdatePolicy::Force) => {
                                         quote! { ::rmk::split::central::UpdatePolicy::Force }
                                     }
                                     _ => quote! { ::rmk::split::central::UpdatePolicy::MatchHash },

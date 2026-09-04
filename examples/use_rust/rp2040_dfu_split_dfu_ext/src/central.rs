@@ -20,7 +20,7 @@ use embassy_rp::{bind_interrupts, dma};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{partitions_from_linkerscript, FlashMutex, Partition, FlashDfuHandler};
+use rmk::dfu::{partitions_from_linkerscript, FlashDfuHandler, FlashMutex, Partition};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::futures::future::join;
 use rmk::host::HostService;

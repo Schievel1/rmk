@@ -101,6 +101,9 @@ pub(crate) enum SplitMessage {
     /// Peripheral → Central: confirm mark_updated succeeded, about to reset.
     #[cfg(feature = "dfu_split")]
     FirmwareUpdateConfirm,
+    /// Central → Peripheral: request system reset.
+    #[cfg(feature = "dfu_split")]
+    SystemReset,
 }
 
 // -----------------------------------------------------------------------
@@ -144,5 +147,5 @@ impl<'de> Deserialize<'de> for FirmwareChunkData {
 
 #[cfg(feature = "dfu_split")]
 impl MaxSize for FirmwareChunkData {
-    const POSTCARD_MAX_SIZE: usize = 258;
+    const POSTCARD_MAX_SIZE: usize = SPLIT_CHUNK_SIZE + 2;
 }

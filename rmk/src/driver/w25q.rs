@@ -184,6 +184,18 @@ impl<SPI: embedded_hal::spi::Error + core::fmt::Debug> core::fmt::Display for W2
     }
 }
 
+#[cfg(feature = "defmt")]
+impl<SPI: embedded_hal::spi::Error + defmt::Format> defmt::Format for W25qError<SPI> {
+    fn format(&self, f: defmt::Formatter) {
+        match self {
+            W25qError::Spi(e) => defmt::write!(f, "Spi({})", e),
+            W25qError::Timeout => defmt::write!(f, "Timeout"),
+            W25qError::WriteProtect => defmt::write!(f, "WriteProtect"),
+            W25qError::WriteNotAccepted => defmt::write!(f, "WriteNotAccepted"),
+        }
+    }
+}
+
 impl<SPI: embedded_hal::spi::Error> NorFlashError for W25qError<SPI> {
     fn kind(&self) -> NorFlashErrorKind {
         NorFlashErrorKind::Other
