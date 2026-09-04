@@ -63,7 +63,7 @@ pub use embassy_embedded_hal::flash::partition::Partition;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[cfg(feature = "_dfu")]
 use embassy_sync::channel::Channel;
-#[cfg(feature = "dfu_lock")]
+#[cfg(any(feature = "dfu_lock", feature = "dfu_split"))]
 use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::NorFlash;
 #[cfg(feature = "_dfu")]
@@ -252,6 +252,14 @@ pub(crate) static DFU_CHANNEL: Channel<CriticalSectionRawMutex, DfuCmd, DFU_CMD_
 #[cfg(feature = "_dfu")]
 pub(crate) static DFU_WRITE_ERRORS: AtomicU32 = AtomicU32::new(0);
 
+/// Per-peripheral wake signals. The USB ISR ([`ProxyUsbDfuHandler`]) calls
+/// `signal(())` after forwarding a command to [`DFU_CHANNEL`]; the matching
+/// [`PeripheralManager`](crate::split::driver::PeripheralManager) awaits
+/// on `wait()` in its select loop.
+#[cfg(feature = "dfu_split")]
+pub(crate) static DFU_PERIPH_SIGNALS: [Signal<CriticalSectionRawMutex, ()>; MAX_DFU_ALTS] =
+    [const { Signal::new() }; MAX_DFU_ALTS];
+
 // ---------------------------------------------------------------------------
 // DFU lock state
 // ---------------------------------------------------------------------------
@@ -427,14 +435,30 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
 }
 
 #[cfg(feature = "_dfu")]
+fn is_central_cmd(cmd: &DfuCmd) -> bool {
+    matches!(
+        cmd,
+        DfuCmd::Start(DfuTarget::Central)
+            | DfuCmd::Write(DfuTarget::Central, _, _)
+            | DfuCmd::Finish(DfuTarget::Central)
+            | DfuCmd::SystemReset(DfuTarget::Central)
+    )
+}
+
+#[cfg(feature = "_dfu")]
 impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandler<DFU, STATE> {
     async fn run(&mut self) -> ! {
         loop {
-            let cmd = DFU_CHANNEL.receive().await;
-            self.handle_cmd(cmd).await;
-            while let Ok(cmd) = DFU_CHANNEL.try_receive() {
-                self.handle_cmd(cmd).await;
+            loop {
+                match DFU_CHANNEL.try_peek() {
+                    Ok(cmd) if is_central_cmd(&cmd) => {
+                        let cmd = DFU_CHANNEL.try_receive().expect("peeked ok");
+                        self.handle_cmd(cmd).await;
+                    }
+                    _ => break,
+                }
             }
+            embassy_futures::yield_now().await;
         }
     }
 }

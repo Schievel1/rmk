@@ -227,7 +227,13 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
         loop {
             #[cfg(feature = "dfu_split")]
             if !crate::dfu::DFU_CHANNEL.is_empty() {
-                self.handle_dfu_passthrough().await;
+                if self.handle_dfu_passthrough().await {
+                    continue;
+                }
+                // Message not for us — yield so the executor can poll
+                // FlashDfuHandler (Central messages) or other PMs, then
+                // re-check the channel.
+                embassy_futures::yield_now().await;
                 continue;
             }
 
@@ -254,7 +260,8 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             };
 
             #[cfg(feature = "dfu_split")]
-            let event_or_signal = select(next_event_to_peri, crate::dfu::DFU_CHANNEL.ready_to_receive());
+            let event_or_signal =
+                select(next_event_to_peri, crate::dfu::DFU_PERIPH_SIGNALS[self.id as usize].wait()).fuse();
             #[cfg(not(feature = "dfu_split"))]
             let event_or_signal = next_event_to_peri;
 
@@ -268,14 +275,16 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     Err(e) => error!("Peripheral message read error: {:?}", e),
                 },
                 #[cfg(feature = "dfu_split")]
-                Either::Second(result) => match result {
-                    Either::First(msg) => {
-                        if self.send(&msg).await.is_err() {
-                            return;
-                        }
+                Either::Second(Either::First(msg)) => {
+                    if self.send(&msg).await.is_err() {
+                        return;
                     }
-                    Either::Second(_) => {}
-                },
+                }
+                #[cfg(feature = "dfu_split")]
+                Either::Second(Either::Second(())) => {
+                    // DFU channel has messages — will be handled at the
+                    // top of the next loop iteration.
+                }
                 #[cfg(not(feature = "dfu_split"))]
                 Either::Second(msg) => {
                     if self.send(&msg).await.is_err() {
@@ -356,18 +365,32 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
     /// [`DFU_CHANNEL`] and forwards commands targeted at this peripheral
     /// over the split link.
     ///
+    /// Returns `true` if at least one message was consumed from the channel.
+    /// Returns `false` if the head message was not for this peripheral (caller
+    /// must fall through to the normal event loop to avoid a tight spin).
+    ///
     /// On `Finish`, triggers end-to-end CRC verification: the peripheral
     /// reads back its DFU partition, sends the CRC-32, the central
     /// compares, and sends `FirmwareCrcOk` / `FirmwareCrcFail`.
     #[cfg(feature = "dfu_split")]
-    async fn handle_dfu_passthrough(&mut self) {
+    async fn handle_dfu_passthrough(&mut self) -> bool {
         use embassy_time::{Duration, Instant, Timer};
 
+        let mut consumed = false;
         while let Ok(cmd) = crate::dfu::DFU_CHANNEL.try_peek() {
             match cmd {
+                crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::Peripheral(id))
+                    if id == self.id as u8 =>
+                {
+                    consumed = true;
+                    let _ = crate::dfu::DFU_CHANNEL.try_receive();
+                    self.passthrough_crc = crate::crc32::Crc32::new();
+                    info!("dfu_split: DFU download started for peripheral {}", self.id);
+                }
                 crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::Peripheral(id), _, _)
                     if id == self.id as u8 =>
                 {
+                    consumed = true;
                     // Consume the message (borrow from peek is dropped)
                     let crate::dfu::DfuCmd::Write(_, base_offset, data) =
                         crate::dfu::DFU_CHANNEL.try_receive().expect("peeked but receive failed")
@@ -394,7 +417,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         };
                         if self.send(&msg).await.is_err() {
                             error!("dfu_split: disconnected during chunk send");
-                            return;
+                            return true;
                         }
 
                         // Wait for the peripheral to acknowledge this chunk
@@ -418,13 +441,14 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                 }
                 crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
                     // Consume the message
+                    consumed = true;
                     let _ = crate::dfu::DFU_CHANNEL.try_receive();
 
                     info!("dfu_split: DFU download complete, starting end-to-end verification");
 
                     if self.send(&SplitMessage::FirmwareUpdateComplete).await.is_err() {
                         error!("dfu_split: disconnected during finish");
-                        return;
+                        return true;
                     }
 
                     let deadline = Instant::now() + Duration::from_secs(5);
@@ -446,7 +470,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     let Some(peripheral_crc) = crc else {
                         error!("dfu_split: CRC verification failed");
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
-                        return;
+                        return true;
                     };
 
                     let central_crc = self.passthrough_crc.finalize();
@@ -458,13 +482,13 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             central_crc, peripheral_crc
                         );
                         self.send(&SplitMessage::FirmwareCrcFail).await.ok();
-                        return;
+                        return true;
                     }
 
                     info!("dfu_split: CRC OK, confirming update");
                     if self.send(&SplitMessage::FirmwareCrcOk).await.is_err() {
                         error!("dfu_split: disconnected during CRC OK");
-                        return;
+                        return true;
                     }
 
                     let deadline = Instant::now() + Duration::from_secs(2);
@@ -493,6 +517,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                 }
             }
         }
+        consumed
     }
 
     /// Check if the peripheral's firmware is up to date and update if needed.

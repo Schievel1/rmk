@@ -282,13 +282,24 @@ struct ProxyUsbDfuHandler {
 }
 
 #[cfg(feature = "_dfu")]
+impl ProxyUsbDfuHandler {
+    fn signal_peripheral(&self) {
+        if let crate::dfu::DfuTarget::Peripheral(id) = self.target {
+            crate::dfu::DFU_PERIPH_SIGNALS[id as usize].signal(());
+        }
+    }
+}
+
+#[cfg(feature = "_dfu")]
 impl dfu_mode::Handler for ProxyUsbDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
         crate::dfu::dfu_lock_check()?;
         self.written = 0;
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
         info!("dfu: DFU download started ({:?})", self.target);
-        DFU_CHANNEL.try_send(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)
+        DFU_CHANNEL.try_send(DfuCmd::Start(self.target)).map_err(|_| Status::ErrUnknown)?;
+        self.signal_peripheral();
+        Ok(())
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Status> {
@@ -301,7 +312,9 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
         self.written += data.len() as u32;
-        DFU_CHANNEL.try_send(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)
+        DFU_CHANNEL.try_send(DfuCmd::Write(self.target, offset, buf)).map_err(|_| Status::ErrUnknown)?;
+        self.signal_peripheral();
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), Status> {
@@ -314,6 +327,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
             publish_event(DfuStatusEvent::new(DfuStatus::Error));
             return Err(Status::ErrUnknown);
         }
+        self.signal_peripheral();
         publish_event(DfuStatusEvent::new(DfuStatus::Finished));
         info!("dfu: DFU download complete");
         Ok(())
@@ -321,6 +335,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
 
     fn system_reset(&mut self) {
         let _ = DFU_CHANNEL.try_send(DfuCmd::SystemReset(self.target));
+        self.signal_peripheral();
     }
 }
 
