@@ -418,8 +418,7 @@ The index of the alternate setting (`-a`) is off by one due to technical reasons
 
 The peripheral must partition its flash from the linker layout (`partitions_from_linkerscript()`),
 pass the partitions to `run_rmk_split_peripheral()` so forwarded firmware can be
-written to flash, and `mark_booted()` so that the bootloader does not revert the
-update. With `#[rmk_peripheral(id = …)]`
+written to flash — `mark_booted()` is called automatically. With `#[rmk_peripheral(id = …)]`
 (TOML API) this is generated automatically when a `[dfu]` section is
 present in `keyboard.toml`. On a split keyboard the peripheral can use its
 own `[split.peripheral.dfu]` section instead — it fully replaces the global
@@ -436,10 +435,7 @@ use rmk::dfu::{FlashMutex, partitions_from_linkerscript};
 
 // The peripheral has no storage partition, so it is discarded.
 let flash_mutex = FlashMutex::new(RefCell::new(Flash::new_blocking(p.FLASH)));
-let (_, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
-
-// mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-rmk::dfu::mark_booted(&mut state_partition);
+let (_, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
 // optional DFU LED for the peripheral
 let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
@@ -452,11 +448,11 @@ join(
 .await;
 ```
 
-Without `mark_booted()` embassy-boot will revert the update at next reboot, because it thinks the new firmware did not boot. (Visible as three short flashes of the DFU LED when using rmk-boot.)
+`mark_booted()` is called automatically inside `run_rmk_split_peripheral()`. The bootloader reverts the update if the firmware crashes before this happens.
 
 ### Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Peripheral flashes 3 times after update | Firmware crashed or `mark_booted()` not called in the peripheral. Build with the `dfu_rp`/`dfu_nrf` feature (using config) or call `rmk::dfu::mark_booted()` (using Rust). |
+| Peripheral flashes 3 times after update | Firmware crashed before `mark_booted()` was called automatically. Build with the `dfu_rp`/`dfu_nrf` feature (using config) or ensure `FlashDfuHandler` is used (using Rust). |
 | `dfu-util -a 1` shows `dfuERROR` or hangs at 0% | Peripheral not connected or its firmware is built without the `dfu_split` feature. |

@@ -673,12 +673,10 @@ pub(crate) struct StorageConfig {
 /// Config for DFU (embassy-boot).
 ///
 /// Offsets come from `rmk-memory.x` linker symbols. This section only
-/// configures DFU behaviour (LED, unlock keys, page size).
+/// configures DFU behaviour (LED, unlock keys).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DfuTomlConfig {
-    /// Flash page size in bytes (e.g. 4096 for RP2040).
-    pub page_size: Option<u32>,
     /// Optional DFU activity LED pin, e.g. `"PIN_16"`. When set, the LED
     /// is lit while a DFU download is in progress.
     pub led: Option<String>,
@@ -1048,6 +1046,19 @@ pub struct SplitConfig {
     pub peripheral: Vec<SplitBoardConfig>,
 }
 
+/// DFU update policy for split peripherals.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePolicy {
+    /// Only flash when the firmware hash differs (default).
+    #[default]
+    #[serde(alias = "MatchHash")]
+    MatchHash,
+    /// Always flash, regardless of the current firmware.
+    #[serde(alias = "force")]
+    Force,
+}
+
 /// Configurations for each split board
 ///
 /// The transport field must match `split.connection`: `serial` is required for
@@ -1097,9 +1108,9 @@ pub struct SplitBoardConfig {
     /// includes the binary with `include_bytes!` and registers it via
     /// [`set_firmware_update_data`](crate::set_firmware_update_data).
     pub firmware: Option<String>,
-    /// DFU update policy for this peripheral. "MatchHash" (default) only
-    /// flashes when the firmware differs; "force" always flashes.
-    pub update_policy: Option<String>,
+    /// DFU update policy for this peripheral. `"match_hash"` (default) only
+    /// flashes when the firmware differs; `"force"` always flashes.
+    pub update_policy: Option<UpdatePolicy>,
 }
 
 /// Serial port config

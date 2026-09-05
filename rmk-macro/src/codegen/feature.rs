@@ -51,12 +51,3 @@ pub(crate) fn is_feature_enabled(feature_list: &Option<Vec<String>>, feature: &s
     }
     false
 }
-
-/// Whether the flash-init expansion defines the `state_partition` and
-/// `dfu_partition` locals. Sound because rmk's lib guards enforce
-/// `dfu ⇒ dfu_rp | dfu_nrf`, so `dfu` on means a chip backend — and with it
-/// the partitions — is compiled in. All code referencing those partitions
-/// gates on this instead of re-deriving `dfu_rp || dfu_nrf`.
-pub(crate) fn defines_dfu_partitions() -> bool {
-    cfg!(feature = "_dfu")
-}

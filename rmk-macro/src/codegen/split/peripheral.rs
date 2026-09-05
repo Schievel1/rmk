@@ -15,7 +15,7 @@ use crate::codegen::chip::flash::{expand_dfu_interface, expand_flash_init};
 use crate::codegen::chip::gpio::expand_output_initialization;
 use crate::codegen::display::{expand_display_config, expand_display_interrupt};
 use crate::codegen::entry::join_all_tasks;
-use crate::codegen::feature::{defines_dfu_partitions, get_rmk_features, is_feature_enabled};
+use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 use crate::codegen::import::expand_custom_imports;
 use crate::codegen::input_device::adc::expand_adc_device;
 use crate::codegen::input_device::encoder::expand_encoder_device;
@@ -59,7 +59,7 @@ pub(crate) fn parse_split_peripheral_mod(
         .split_side_dfu(Some(id))
         .expect("failed to resolve split-side dfu config");
 
-    let dfu_enabled = defines_dfu_partitions();
+    let dfu_enabled = cfg!(feature = "_dfu");
     let usb_log_enabled = is_feature_enabled(&rmk_features, "usb_log");
     let device_config = if dfu_enabled || usb_log_enabled {
         let vid = identity.vendor_id;
@@ -179,7 +179,7 @@ fn expand_bind_interrupt_for_split_peripheral(
     };
     let iqs5xx_interrupt = expand_iqs5xx_interrupts(&chip.series, &iqs5xx_config_for_irq);
 
-    let dfu_enabled = defines_dfu_partitions();
+    let dfu_enabled = cfg!(feature = "_dfu");
     let usb_log_enabled = is_feature_enabled(rmk_features, "usb_log");
     let usb_enabled = dfu_enabled || usb_log_enabled;
 
@@ -389,7 +389,7 @@ fn expand_split_peripheral(
         .expect("Missing peripheral config");
 
     // True exactly when the flash init defines `state_partition`/`dfu_partition`.
-    let dfu_enabled = defines_dfu_partitions();
+    let dfu_enabled = cfg!(feature = "_dfu");
 
     let imports = expand_custom_imports(&item_mod);
     let mut chip_init = expand_chip_init(hardware, Some(id), &item_mod);
@@ -405,11 +405,6 @@ fn expand_split_peripheral(
         chip_init.extend(quote! { #flash_init });
     }
 
-    // Mark booted when DFU is enabled so the bootloader doesn't
-    // revert the previous update.
-    if dfu_enabled {
-        chip_init.extend(quote! { ::rmk::dfu::mark_booted(&mut state_partition).await; });
-    }
     // Clone the partitions for over-the-split-link firmware updates so the
     // originals can still be moved into the USB DFU updater below.
     let dfu_split_enabled = is_feature_enabled(rmk_features, "dfu_split");

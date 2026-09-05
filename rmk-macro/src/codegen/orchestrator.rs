@@ -15,7 +15,7 @@ use super::chip::flash::expand_flash_init;
 use super::chip::gpio::expand_output_config;
 use super::display::expand_display_config;
 use super::entry::expand_rmk_entry;
-use super::feature::{defines_dfu_partitions, get_rmk_features, is_feature_enabled};
+use super::feature::{get_rmk_features, is_feature_enabled};
 use super::import::expand_custom_imports;
 use super::input_device::expand_input_device_config;
 use super::keyboard_config::{
@@ -421,15 +421,6 @@ fn expand_main(
         }
     };
 
-    // `state_partition` exists (from the flash init) exactly when DFU codegen
-    // ran, so gate on that instead of a `#[cfg]` — a cfg inside the emitted
-    // code would evaluate against the user crate's features.
-    let mark = if defines_dfu_partitions() {
-        quote! { ::rmk::dfu::mark_booted(&mut state_partition).await; }
-    } else {
-        quote! {}
-    };
-
     quote! {
         #imports
 
@@ -468,11 +459,6 @@ fn expand_main(
 
             // Initialize the storage and keymap, as `storage` and `keymap`
             #keymap_and_storage
-
-            // Mark the firmware as booted so the bootloader stops rolling
-            // back. Only emitted with a DFU chip feature (`dfu_rp`/`dfu_nrf`),
-            // where `state_partition` exists from the flash init above.
-            #mark
 
             // Initialize the matrix + keyboard, as `matrix` and `keyboard`
             #matrix_and_keyboard

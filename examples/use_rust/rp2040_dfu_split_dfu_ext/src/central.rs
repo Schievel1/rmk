@@ -20,7 +20,7 @@ use embassy_rp::{bind_interrupts, dma};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{partitions_from_linkerscript, FlashMutex, Partition, RmkDfuInterface};
+use rmk::dfu::{partitions_from_linkerscript, FlashDfuHandler, FlashMutex, Partition};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::futures::future::join;
 use rmk::host::HostService;
@@ -85,7 +85,7 @@ async fn main(_spawner: Spawner) {
         embassy_rp::flash::Blocking,
         { rmk::dfu::FLASH_SIZE },
     >::new_blocking(p.FLASH)));
-    let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
+    let (storage_partition, state_partition, _) = partitions_from_linkerscript(&flash_mutex);
 
     let keyboard_device_config = DeviceConfig {
         vid: 0x4c4b,
@@ -121,9 +121,6 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    // mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-    rmk::dfu::mark_booted(&mut state_partition).await;
-
     // DFU LED processor, optional. Flashes the LED when DFU is active
     let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
 
@@ -137,7 +134,7 @@ async fn main(_spawner: Spawner) {
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config, 1).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 

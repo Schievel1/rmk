@@ -46,10 +46,7 @@ async fn main(_spawner: Spawner) {
         embassy_rp::flash::Blocking,
         { rmk::dfu::FLASH_SIZE },
     >::new_blocking(p.FLASH)));
-    let (_, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
-
-    // mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-    rmk::dfu::mark_booted(&mut state_partition).await;
+    let (_, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     // DFU LED processor, optional. Flashes the LED when DFU is active
     let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);

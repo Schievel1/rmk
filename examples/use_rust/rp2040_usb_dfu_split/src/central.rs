@@ -19,7 +19,7 @@ use embassy_rp::{bind_interrupts, dma};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::futures::future::join;
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
@@ -53,9 +53,7 @@ async fn main(_spawner: Spawner) {
         embassy_rp::flash::Blocking,
         { rmk::dfu::FLASH_SIZE },
     >::new_blocking(p.FLASH)));
-    let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
-
-    rmk::dfu::mark_booted(&mut state_partition).await;
+    let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let keyboard_device_config = DeviceConfig {
         vid: 0x4c4b,
@@ -102,7 +100,7 @@ async fn main(_spawner: Spawner) {
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 

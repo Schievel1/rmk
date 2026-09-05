@@ -17,7 +17,7 @@ use embassy_rp::{bind_interrupts, dma};
 use panic_probe as _;
 use rmk::config::DeviceConfig;
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::run_all;
@@ -45,9 +45,7 @@ async fn main(_spawner: Spawner) {
         embassy_rp::flash::Blocking,
         { rmk::dfu::FLASH_SIZE },
     >::new_blocking(p.FLASH)));
-    let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
-
-    rmk::dfu::mark_booted(&mut state_partition).await;
+    let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     // DFU USB device so the peripheral can be firmware-updated via USB
     let dfu_driver = Driver::new(p.USB, Irqs);
@@ -81,7 +79,7 @@ async fn main(_spawner: Spawner) {
 
     let mut watchdog_runner = Rp2040Watchdog::default_runner(embassy_rp::watchdog::Watchdog::new(p.WATCHDOG));
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
 
     join3(
         run_all!(matrix, storage, dfu_iface, dfu_led, watchdog_runner),

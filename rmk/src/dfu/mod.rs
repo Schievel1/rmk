@@ -1,36 +1,67 @@
-#[cfg(feature = "_dfu")]
-use core::cell::RefCell;
-#[cfg(feature = "_dfu")]
-use core::sync::atomic::AtomicBool;
-#[cfg(feature = "_dfu")]
-use core::sync::atomic::AtomicU32;
-#[cfg(feature = "_dfu")]
-use core::sync::atomic::Ordering;
+//! # DFU — Device Firmware Update
+//!
+//! This module implements USB DFU firmware updates for RMK keyboards.
+//!
+//! ## Data flow
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────────┐
+//! │  Host (dfu-util / WebUSB)                                        │
+//! │    USB Control Transfer (GET_DESCRIPTOR / DFU_DNLOAD)            │
+//! └──────────────┬──────────────────────────────────┬────────────-───┘
+//!                │                                  │
+//!                ▼                                  ▼
+//! ┌─-─────────────────────────┐        ┌──────────────────────────────┐
+//! │  UsbDfuIface              │        │  ProxyUsbDfuHandler          │
+//! │  (USB control handler)    │        │  (ISR → DFU_CHANNEL)         │
+//! │                           │        │                              │
+//! │  alt 0 → Central          │        │  target = DfuTarget::Central │
+//! │  alt 1 → Peripheral(0)    │        │  writes: DfuCmd::Write(tgt,  │
+//! │  alt 2 → Peripheral(1)    │        │          offset, data[512])  │
+//! │  ...                      │        └──────────┬───────────────────┘
+//! └──-────────────────────────┘                   │
+//!                                                 │
+//!                           DFU_CHANNEL (cap 4)   ▼
+//! ┌───────────────────────────────────────────────────────────────┐
+//! │                                                               │
+//! │  ┌─── PeripheralManager (central event loop) ──────────────┐  │
+//! │  │  peek DFU_CHANNEL for DfuTarget::Peripheral(n)          │  │
+//! │  │  forward as SplitMessage::FirmwareChunk → split link    │──────────┐
+//! │  │  → peripheral FlashDfuHandler                           │  │       │
+//! │  └─────────────────────────────────────────────────────────┘  │       │
+//! │                                                               │       │
+//! │  ┌─── FlashDfuHandler (central) ─────────────────────────-─┐  │       │
+//! │  │  peek DFU_CHANNEL for DfuTarget::Central                │  │       │
+//! │  │  start → write_chunk(offset, data[512]) → finish        │  │       │
+//! │  │  erase on demand, NorFlash::write to DFU partition      │  │       │
+//! │  │  finish → sanity check (MSP+reset vector)               │  │       │
+//! │  │         → mark_updated_and_reset()                      │  │       │
+//! │  └──────────────────────────────────────────────────────-──┘  │       │
+//! └───────────────────────────────────────────────────────────────┘       │
+//!                                                                         │
+//!                                                ┌─────split link (UART)──┘
+//!                                                ▼                         
+//! ┌─── Peripheral (direct calls, no channel) ─────────────────────┐       
+//! │  FlashDfuHandler::write_chunk(offset, data)                   │
+//! │  FlashDfuHandler::compute_dfu_crc() → FirmwareCrcReport       │
+//! │  mark_updated_and_reset() only on FirmwareCrcOk               │
+//! └───────────────────────────────────────────────────────────────┘
+//!
 
-// ---------------------------------------------------------------------------
-// Flash partition types and constants
-// ---------------------------------------------------------------------------
-#[cfg(feature = "_dfu")]
-use embassy_boot::{FirmwareState, FirmwareUpdater, FirmwareUpdaterConfig};
-#[cfg(feature = "_dfu")]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use embassy_boot::FirmwareState;
 pub use embassy_embedded_hal::flash::partition::Partition;
-#[cfg(feature = "_dfu")]
-use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
-#[cfg(feature = "_dfu")]
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-#[cfg(feature = "_dfu")]
+use embassy_sync::channel::Channel;
+#[cfg(any(feature = "dfu_split", feature = "dfu_lock"))]
 use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::NorFlash;
-#[cfg(feature = "_dfu")]
 use heapless;
-#[cfg(feature = "dfu_lock")]
 use rmk_types::dfu::DfuStatus;
-use static_cell::StaticCell;
 
-#[cfg(feature = "_dfu")]
 use crate::core_traits::Runnable;
-#[cfg(feature = "dfu_lock")]
-use crate::event::publish_event;
+use crate::event::{DfuStatusEvent, publish_event};
 
 /// Total flash size passed to the embassy-rp Flash const generic.
 ///
@@ -43,23 +74,14 @@ use crate::event::publish_event;
 #[cfg(feature = "dfu_rp")]
 pub const FLASH_SIZE: usize = 16 * 1024 * 1024;
 
-/// Capacity of the aligned scratch buffer used by embassy-boot. Must be >=
-/// the largest `WRITE_SIZE` among all supported flash types (RP2040 internal
-/// flash and 25-series SPI NOR: 1; nRF NVMC: 4). The buffer is sliced to the
-/// state partition's exact `WRITE_SIZE` before being handed to embassy-boot.
-#[cfg(feature = "_dfu")]
-pub const DFU_WRITE_SIZE: usize = 256;
-
 /// Block size of a DFU download transferred per USB control request.
 /// Larger values speed up firmware downloads. Must match the USB control
 /// buffer size used by the host.
 pub const BLOCK_SIZE_DFU: usize = 512;
 
 /// Partition layout read from the DFU symbols in `memory.x`.
-///
 /// The offsets are flash-relative and come from the `__bootloader_*` symbols
 /// that rmk-boot's generated `memory.x` provides.
-#[cfg(feature = "_dfu")]
 #[derive(Clone, Copy, Debug)]
 pub struct DfuFlashLayout {
     /// Offset of the DFU download partition.
@@ -82,7 +104,6 @@ pub struct DfuFlashLayout {
 ///
 /// Reads linker-defined absolute symbols. The symbols must be present in the
 /// linked binary or the firmware will not link.
-#[cfg(feature = "_dfu")]
 pub fn dfu_flash_layout() -> DfuFlashLayout {
     unsafe extern "C" {
         static __bootloader_state_start: u8;
@@ -107,16 +128,7 @@ pub fn dfu_flash_layout() -> DfuFlashLayout {
 }
 
 /// Mutex guarding the flash, shared by all partitions.
-#[cfg(feature = "_dfu")]
 pub type FlashMutex<F> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, F>;
-
-/// A partition of the flash (DFU download, boot state, or storage).
-#[cfg(feature = "_dfu")]
-pub type DfuPartition<'a, F> = Partition<'a, CriticalSectionRawMutex, F>;
-
-/// The storage partition — same as DfuPartition now (async, no wrapper needed).
-#[cfg(feature = "_dfu")]
-pub type DfuStorage<'a, F> = DfuPartition<'a, F>;
 
 /// Build the storage, boot state and DFU download partitions from the
 /// `memory.x` layout (see [`dfu_flash_layout`]).
@@ -124,18 +136,21 @@ pub type DfuStorage<'a, F> = DfuPartition<'a, F>;
 /// Returns `(storage, state, dfu)` partitions over the same flash mutex.
 /// `storage` is async — pass it straight to the keymap/storage layer.
 /// `state` feeds [`mark_booted`]; `dfu` and `state` go into
-/// [`RmkDfuInterface::new`].
+/// [`FlashDfuHandler::new`].
 ///
 /// When the DFU download partition lives on an external flash (`dfu_ext`),
 /// discard the returned `dfu` partition and build the external one yourself.
-#[cfg(feature = "_dfu")]
 pub fn partitions_from_linkerscript<'a, F: NorFlash>(
     flash_mutex: &'a FlashMutex<F>,
-) -> (DfuStorage<'a, F>, DfuPartition<'a, F>, DfuPartition<'a, F>) {
+) -> (
+    Partition<'a, CriticalSectionRawMutex, F>,
+    Partition<'a, CriticalSectionRawMutex, F>,
+    Partition<'a, CriticalSectionRawMutex, F>,
+) {
     let layout = dfu_flash_layout();
-    let storage = DfuPartition::new(flash_mutex, layout.storage_offset, layout.storage_size);
-    let state = DfuPartition::new(flash_mutex, layout.state_offset, layout.state_size);
-    let dfu = DfuPartition::new(flash_mutex, layout.dfu_offset, layout.dfu_size);
+    let storage = Partition::new(flash_mutex, layout.storage_offset, layout.storage_size);
+    let state = Partition::new(flash_mutex, layout.state_offset, layout.state_size);
+    let dfu = Partition::new(flash_mutex, layout.dfu_offset, layout.dfu_size);
     (storage, state, dfu)
 }
 
@@ -145,277 +160,397 @@ pub fn partitions_from_linkerscript<'a, F: NorFlash>(
 /// `state` is the boot state partition — typically built with
 /// [`partitions_from_linkerscript`].
 ///
-/// Must be called *after* the firmware is confirmed running, before the
-/// bootloader's timeout would consider the update failed.
-#[cfg(feature = "_dfu")]
+/// Must be called *after* the firmware is confirmed running.
+///
+/// When using [`FlashDfuHandler`], this is called automatically — but users
+/// need this free function if they use a swap-based bootloader outside of RMK
+/// and don't have a `FlashDfuHandler`.
 pub async fn mark_booted<STATE: NorFlash>(state: &mut STATE) {
-    static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
-    let mut firmware_state = FirmwareState::new(state, &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE]);
+    let mut aligned = [0u8; 16];
+    let mut firmware_state = FirmwareState::new(state, &mut aligned[..STATE::WRITE_SIZE]);
     firmware_state.mark_booted().await.ok();
 }
-
-// ---------------------------------------------------------------------------
-// dfu_split sub-module (behind feature flag)
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "dfu_split")]
 mod split;
 #[cfg(feature = "dfu_split")]
-pub(crate) use self::split::PassthroughDfuHandler;
-#[cfg(feature = "dfu_split")]
-pub(crate) use self::split::{
-    PASSTHROUGH_SIGNAL, PASSTHROUGH_TARGET, PassthroughCommand, passthrough_done_if_empty, passthrough_pending,
-    passthrough_take_command,
-};
-#[cfg(feature = "dfu_split")]
-pub use self::split::{
-    SplitDfuHandler, get_firmware_update_data, read_embedded_firmware_hash, set_firmware_update_data,
-};
+pub use self::split::{get_firmware_update_data, read_embedded_firmware_hash, set_firmware_update_data};
 
-// ---------------------------------------------------------------------------
-// DFU command channel (USB proxy → updater task)
-// ---------------------------------------------------------------------------
+/// Command queue capacity — USB control block plus slack for split forwarding.
+const DFU_CMD_QUEUE_SIZE: usize = 4;
 
-/// Command queue capacity — one USB control block plus slack.
-#[cfg(feature = "_dfu")]
-const DFU_CMD_QUEUE_SIZE: usize = 2;
+/// Identifies the target of a DFU command — local central firmware or a
+/// specific split peripheral.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) enum DfuTarget {
+    Central,
+    Peripheral(u8),
+}
 
 /// A command forwarded from the USB DFU proxy to the async updater task.
-#[cfg(feature = "_dfu")]
+#[derive(Clone)]
 pub(crate) enum DfuCmd {
-    Start,
-    Write(heapless::Vec<u8, { BLOCK_SIZE_DFU }>),
-    Finish,
-    SystemReset,
+    Start(DfuTarget),
+    /// `Write(target, offset, data)` — offset is the flash byte offset.
+    Write(DfuTarget, u32, heapless::Vec<u8, { BLOCK_SIZE_DFU }>),
+    Finish(DfuTarget),
+    SystemReset(DfuTarget),
 }
 
-/// Fire-and-forget command queue. The USB DFU proxy (ISR context) pushes; the
-/// [`RmkDfuInterface`] updater task pops. Protected by a critical-section
-/// mutex so it is safe from both contexts.
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_CMD: BlockingMutex<CriticalSectionRawMutex, RefCell<heapless::Vec<DfuCmd, DFU_CMD_QUEUE_SIZE>>> =
-    BlockingMutex::new(RefCell::new(heapless::Vec::new()));
+impl DfuCmd {
+    /// The target (central or peripheral) of this command.
+    fn target(&self) -> DfuTarget {
+        match self {
+            DfuCmd::Start(t) | DfuCmd::Write(t, _, _) | DfuCmd::Finish(t) | DfuCmd::SystemReset(t) => *t,
+        }
+    }
 
-/// Wakeup signal: set when a command is pushed to [`DFU_CMD`].
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+    /// Returns `true` when this command is for the central flash updater.
+    fn is_central(&self) -> bool {
+        matches!(self.target(), DfuTarget::Central)
+    }
 
-/// Doorbell atomic: true while the command queue is non-empty. Read by the
-/// transport's GETSTATUS handling to inject `dfuDNBUSY` (adaptive host-side
-/// flow control, mirroring [`PASSTHROUGH_TARGET`]).
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_BUSY: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "_dfu")]
-pub(crate) static DFU_WRITE_ERRORS: AtomicU32 = AtomicU32::new(0);
-
-/// Push a command into the queue (ISR-safe). Returns `Err(())` when full.
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_push(cmd: DfuCmd) -> Result<(), ()> {
-    DFU_CMD.lock(|c| c.borrow_mut().push(cmd).map_err(|_| ()))?;
-    DFU_BUSY.store(true, Ordering::Release);
-    DFU_WAKE.signal(());
-    Ok(())
-}
-
-/// Pop the next pending command (async updater task).
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_take() -> Option<DfuCmd> {
-    DFU_CMD.lock(|c| {
-        let v = &mut *c.borrow_mut();
-        if !v.is_empty() { Some(v.remove(0)) } else { None }
-    })
-}
-
-/// Clear the busy flag if the queue has drained.
-///
-/// Called by the updater task after every drain cycle. The host stays in
-/// `dfuDNBUSY` until the queue catches up.
-#[cfg(feature = "_dfu")]
-pub(crate) fn dfu_clear_busy_if_empty() {
-    let empty = DFU_CMD.lock(|c| c.borrow().is_empty());
-    if empty {
-        DFU_BUSY.store(false, Ordering::Release);
+    /// Returns `true` when this command targets a known peripheral (valid id range).
+    fn is_valid_peripheral(&self) -> bool {
+        matches!(self.target(), DfuTarget::Peripheral(id) if (id as usize) < MAX_DFU_ALTS)
     }
 }
 
-// ---------------------------------------------------------------------------
-// DFU lock state
-// ---------------------------------------------------------------------------
+/// Command channel: the USB DFU proxy (ISR context) sends via
+/// [`DFU_CHANNEL`]; the [`FlashDfuHandler`] updater task receives.
+pub(crate) static DFU_CHANNEL: Channel<CriticalSectionRawMutex, DfuCmd, DFU_CMD_QUEUE_SIZE> = Channel::new();
 
-#[cfg(feature = "dfu_lock")]
-static DFU_LOCKED: AtomicBool = AtomicBool::new(true);
-#[cfg(feature = "dfu_lock")]
-static DFU_STARTED: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "dfu_lock")]
-static DFU_UNLOCK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Set to `true` by the [`FlashDfuHandler`] when a flash write fails.
+/// The USB proxy reads this flag to reject subsequent `DFU_DNLOAD` / `DFU_UPLOAD`
+/// requests with `ERR_WRITE` instead of forwarding corrupted data.
+pub(crate) static DFU_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "dfu_lock")]
-pub fn is_dfu_unlocked() -> bool {
-    !DFU_LOCKED.load(Ordering::Acquire)
-}
+/// Per-peripheral wake signals. The USB ISR ([`ProxyUsbDfuHandler`]) calls
+/// `signal(())` after forwarding a command to [`DFU_CHANNEL`]; the matching
+/// [`PeripheralManager`](crate::split::driver::PeripheralManager) awaits
+/// on `wait()` in its select loop.
+#[cfg(feature = "dfu_split")]
+pub(crate) static DFU_PERIPH_SIGNALS: [Signal<CriticalSectionRawMutex, ()>; MAX_DFU_ALTS] =
+    [const { Signal::new() }; MAX_DFU_ALTS];
 
 /// Gate shared by the transport's DFU start handlers (central alt 0 and the
-/// passthrough slots). Returns `Ok` when a download may proceed and records
-/// that it started; while the keys are locked it wakes the unlock state
-/// machine and rejects the download with `ErrVendor`.
-#[cfg(feature = "_dfu")]
+/// passthrough slots). Returns `Ok` when a download may proceed; while the
+/// keys are locked it wakes the unlock state machine and rejects the download
+/// with `ErrVendor`. The caller is responsible for setting `DFU_STARTED`
+/// after successfully enqueuing the command.
 pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::Status> {
     #[cfg(feature = "dfu_lock")]
     {
         use embassy_usb::class::dfu::consts::Status;
-        if !is_dfu_unlocked() {
+        if DFU_LOCKED.load(Ordering::Acquire) {
             DFU_UNLOCK_SIGNAL.signal(());
             info!("dfu_lock: DFU download rejected — keys not unlocked");
             return Err(Status::ErrVendor);
         }
-        DFU_STARTED.store(true, Ordering::Release);
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// RmkDfuInterface — partition-based DFU updater task
-// ---------------------------------------------------------------------------
-
-/// Max passthrough alt settings supported on a single DFU interface.
-#[cfg(feature = "dfu_split")]
-pub(crate) const MAX_PASSTHROUGH_ALTS: usize = 4;
+/// Max DFU alternate settings on a single DFU interface.
+pub(crate) const MAX_DFU_ALTS: usize = 4;
 
 /// Flash-side DFU updater.
 ///
-/// Owns the embassy-boot async [`FirmwareUpdater`] and runs as a [`Runnable`]
-/// task. It waits on the command channel ([`DFU_CMD`]) and executes
-/// `start`/`write`/`finish`/`system_reset` on the updater, fully decoupled
-/// from the USB device.
+/// Owns the DFU download and boot state partitions and runs as a [`Runnable`]
+/// task on the central. It waits on the command channel ([`DFU_CHANNEL`]) and
+/// executes `start`/`write`/`finish`/`system_reset`, fully decoupled from the
+/// USB device.
+///
+/// On the split peripheral, the same struct is used without the [`Runnable`]
+/// impl — the event loop calls [`write_chunk`](FlashDfuHandler::write_chunk)
+/// and [`compute_dfu_crc`](FlashDfuHandler::compute_dfu_crc) directly.
 ///
 /// The USB side (the proxy in `usb.rs`) never touches flash; all commands flow
 /// through the channel. The partitions are typically built with
 /// [`partitions_from_linkerscript`]:
 ///
-/// ```
+/// ```ignore
 /// let flash_mutex = ::rmk::dfu::FlashMutex::new(flash_driver);
 /// let (_, mut state_partition, dfu_partition) =
 ///     ::rmk::dfu::partitions_from_linkerscript(&flash_mutex);
-/// let mut dfu_iface = ::rmk::dfu::RmkDfuInterface::new(dfu_partition, state_partition);
+/// let mut dfu_iface = ::rmk::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
 /// ```
-#[cfg(feature = "_dfu")]
-pub struct RmkDfuInterface<DFU: NorFlash, STATE: NorFlash> {
-    updater: FirmwareUpdater<'static, DFU, STATE>,
+pub struct FlashDfuHandler<DFU: NorFlash + Clone, STATE: NorFlash + Clone> {
+    dfu_partition: DFU,
+    state_partition: STATE,
+    last_erased_page: Option<u32>,
+    written_len: u32,
     offset: u32,
-    write_errors: u32,
 }
 
-#[cfg(feature = "_dfu")]
-impl<DFU: NorFlash, STATE: NorFlash> RmkDfuInterface<DFU, STATE> {
+impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE> {
     /// Build the DFU updater from a DFU download partition and a boot state
     /// partition.
-    pub fn new(dfu: DFU, state: STATE) -> Self {
-        const { core::assert!(STATE::WRITE_SIZE <= DFU_WRITE_SIZE) };
-        let config = FirmwareUpdaterConfig { dfu, state };
-        static ALIGNED: StaticCell<[u8; DFU_WRITE_SIZE]> = StaticCell::new();
-        let aligned: &'static mut [u8] = &mut ALIGNED.init([0; DFU_WRITE_SIZE])[..STATE::WRITE_SIZE];
-        let updater = FirmwareUpdater::new(config, aligned);
+    pub fn new(dfu_partition: DFU, state_partition: STATE) -> Self {
         Self {
-            updater,
+            dfu_partition,
+            state_partition,
+            last_erased_page: None,
+            written_len: 0,
             offset: 0,
-            write_errors: 0,
+        }
+    }
+
+    /// Write a chunk of firmware data at the given partition offset.
+    ///
+    /// Pages are erased on demand — only the first time a particular page
+    /// is encountered. This avoids a long blocking erase of the entire
+    /// DFU partition on the very first chunk.
+    pub async fn write_chunk(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
+        // Log once on the first call so the user sees progress.
+        if self.written_len == 0 {
+            info!("dfu: firmware update started");
+        }
+        let mut dfu = self.dfu_partition.clone();
+        if data.is_empty() {
+            return Ok(());
+        }
+        // Calculate which flash pages overlap with [offset .. offset+len)
+        // and erase each one exactly once.
+        let erase_size = <DFU as NorFlash>::ERASE_SIZE as u32;
+        let start_page = offset / erase_size;
+        let end = offset + data.len() as u32;
+        let end_page = (end - 1) / erase_size;
+        for page in start_page..=end_page {
+            if self.last_erased_page != Some(page) {
+                dfu.erase(page * erase_size, (page + 1) * erase_size)
+                    .await
+                    .map_err(|_| ())?;
+                self.last_erased_page = Some(page);
+            }
+        }
+        // Write the actual firmware bytes.
+        dfu.write(offset, data).await.map_err(|_| ())?;
+        // Track the highest written offset (used by compute_dfu_crc).
+        self.written_len = self.written_len.max(offset + data.len() as u32);
+        publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
+        Ok(())
+    }
+
+    /// Read back the entire DFU partition and compute its CRC-32.
+    ///
+    /// Only the bytes up to the highest written offset are included.
+    #[cfg(feature = "dfu_split")]
+    pub async fn compute_dfu_crc(&self) -> Result<u32, ()> {
+        let mut dfu = self.dfu_partition.clone();
+        let len = self.written_len as usize;
+        let mut crc = crate::crc32::Crc32::new();
+        let mut buf = [0u8; 256];
+        let mut pos = 0u32;
+        while (pos as usize) < len {
+            let chunk_len = core::cmp::min(256, len - pos as usize);
+            dfu.read(pos, &mut buf[..chunk_len]).await.map_err(|_| ())?;
+            crc.update(&buf[..chunk_len]);
+            pos += chunk_len as u32;
+        }
+        Ok(crc.finalize())
+    }
+
+    /// Mark the new firmware as valid and reset into it.
+    ///
+    /// Writes the swap magic bytes to the state partition via embassy-boot's
+    /// [`FirmwareState`] and then performs a system reset. The bootloader will
+    /// copy the DFU slot to the active slot on the next boot.
+    pub async fn mark_updated_and_reset(&mut self) -> Result<(), ()> {
+        let mut aligned = [0u8; 16];
+        let mut firmware_state = FirmwareState::new(
+            &mut self.state_partition,
+            &mut aligned[..STATE::WRITE_SIZE],
+        );
+        firmware_state.mark_updated().await.map_err(|_| ())?;
+        publish_event(DfuStatusEvent::new(DfuStatus::Finished));
+        #[cfg(all(
+            target_arch = "arm",
+            target_os = "none",
+            any(target_abi = "eabi", target_abi = "eabihf")
+        ))]
+        cortex_m::peripheral::SCB::sys_reset();
+        #[allow(unreachable_code)]
+        Ok(())
+    }
+
+    /// Mark firmware boot as successful so the bootloader doesn't revert the
+    /// update on the next reset.
+    ///
+    /// Called automatically on the first iteration of [`Runnable::run`] (central)
+    /// and in [`run_rmk_split_peripheral`](crate::split::peripheral::run_rmk_split_peripheral)
+    /// (peripheral).
+    pub async fn mark_booted(&mut self) {
+        mark_booted(&mut self.state_partition).await;
+    }
+
+    /// Read the first 8 bytes of the DFU partition and verify they look like
+    /// a valid Cortex-M vector table (non-blank, non-erased MSP and reset
+    /// handler).  Returns `Err` when the image is obviously corrupt — the
+    /// caller aborts the update instead of resetting into a bricked firmware.
+    async fn check_sanity_from_flash(&self) -> Result<(), ()> {
+        let mut dfu = self.dfu_partition.clone();
+        let mut hdr = [0u8; 8];
+        dfu.read(0, &mut hdr).await.map_err(|_| ())?;
+        info!("dfu: DFU[0..8] = {:02x}", hdr);
+        let all_ff = hdr.iter().all(|&b| b == 0xFF);
+        let all_00 = hdr.iter().all(|&b| b == 0x00);
+        let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let reset = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if all_ff || all_00 || msp == 0 || msp == 0xFFFF_FFFF || reset == 0 || reset == 0xFFFF_FFFF {
+            error!("dfu: sanity check failed (msp={:#010x}, reset={:#010x})", msp, reset);
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandler<DFU, STATE> {
+    async fn run(&mut self) -> ! {
+        self.mark_booted().await;
+        loop {
+            // Wait until at least one command is available in the shared
+            // channel. ready_to_receive() blocks without consuming — the
+            // inner loop then peeks and only takes central commands, leaving
+            // peripheral commands for the PeripheralManager.
+            DFU_CHANNEL.ready_to_receive().await;
+
+            // Drain the shared command channel. DFU_CHANNEL is a single MPSC
+            // shared by central and all peripherals. Each consumer peeks the
+            // head without removing it, checks whether the command is for
+            // them, and either receives (removes) it or leaves it for the
+            // next consumer. This inner loop runs until the channel is empty
+            // (or only contains peripheral commands), then re-arms the
+            // ready_to_receive wait.
+            loop {
+                match DFU_CHANNEL.try_peek() {
+                    // Central command — consume and process it
+                    Ok(cmd) if cmd.is_central() => {
+                        let Some(cmd) = DFU_CHANNEL.try_receive().ok() else {
+                            warn!("dfu: peek-receive race, skipping");
+                            continue;
+                        };
+                        self.handle_cmd(cmd).await;
+                    }
+                    // Peripheral command for an invalid id — drain it so it
+                    // doesn't block the channel forever
+                    #[cfg(feature = "dfu_split")]
+                    Ok(cmd) if !cmd.is_valid_peripheral() => {
+                        warn!("dfu: draining orphaned command for invalid peripheral target");
+                        let _ = DFU_CHANNEL.try_receive();
+                    }
+                    // Either empty or a peripheral command for a valid id —
+                    // leave it for the matching PeripheralManager to consume
+                    _ => break,
+                }
+            }
+            embassy_futures::yield_now().await; // give PeripheralManager a chance to run
         }
     }
 }
 
-#[cfg(feature = "_dfu")]
-impl<DFU: NorFlash, STATE: NorFlash> Runnable for RmkDfuInterface<DFU, STATE> {
-    async fn run(&mut self) -> ! {
-        loop {
-            DFU_WAKE.wait().await;
-            while let Some(cmd) = dfu_take() {
-                match cmd {
-                    DfuCmd::Start => {
-                        self.offset = 0;
-                        self.write_errors = 0;
-                        DFU_WRITE_ERRORS.store(0, Ordering::Release);
-                        match self.updater.get_state().await {
-                            Ok(_) => info!("dfu: state ok"),
-                            Err(_) => error!("dfu: get_state failed"),
-                        }
-                    }
-                    DfuCmd::Write(data) => match self.updater.write_firmware(self.offset as usize, &data).await {
-                        Ok(()) => self.offset += data.len() as u32,
-                        Err(_) => {
-                            error!("dfu: firmware write failed");
-                            self.write_errors += 1;
-                            self.offset += data.len() as u32;
-                            DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
-                        }
-                    },
-                    DfuCmd::Finish => {
-                        if self.write_errors > 0 {
-                            error!("dfu: update aborted - {} write errors occurred", self.write_errors);
-                            self.write_errors = 0;
-                        } else {
-                            info!("dfu: {} bytes written, verifying...", self.offset);
-                            let mut hdr = [0u8; 8];
-                            if self.updater.read_dfu(0, &mut hdr).await.is_ok() {
-                                info!("dfu: DFU[0..8] = {:02x}", hdr);
-                            }
-                            let all_ff = hdr.iter().all(|&b| b == 0xFF);
-                            let all_00 = hdr.iter().all(|&b| b == 0x00);
-                            let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-                            let reset = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-                            if all_ff || all_00 || msp == 0 || msp == 0xFFFF_FFFF || reset == 0 || reset == 0xFFFF_FFFF
-                            {
-                                error!(
-                                    "dfu: sanity check failed (msp={:#010x}, reset={:#010x}), skipping mark_updated",
-                                    msp, reset
-                                );
-                                self.write_errors += 1;
-                                DFU_WRITE_ERRORS.store(self.write_errors, Ordering::Release);
-                            } else {
-                                match self.updater.mark_updated().await {
-                                    Ok(()) => info!("dfu: update complete, resetting"),
-                                    Err(_) => error!("dfu: firmware finish failed"),
-                                }
+impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE> {
+    async fn handle_cmd(&mut self, cmd: DfuCmd) {
+        match cmd {
+            DfuCmd::Start(DfuTarget::Central) => {
+                self.offset = 0;
+                DFU_WRITE_FAILED.store(false, Ordering::Release);
+            }
+            DfuCmd::Write(DfuTarget::Central, offset, data) => match self.write_chunk(offset, &data).await {
+                Ok(()) => self.offset = offset + data.len() as u32,
+                Err(()) => {
+                    error!("dfu: firmware write failed at offset {:#010x}", offset);
+                    self.offset = offset + data.len() as u32;
+                    DFU_WRITE_FAILED.store(true, Ordering::Release);
+                    publish_event(DfuStatusEvent::new(DfuStatus::Error));
+                }
+            },
+            DfuCmd::Finish(DfuTarget::Central) => {
+                if DFU_WRITE_FAILED.load(Ordering::Acquire) {
+                    error!("dfu: update aborted - write errors occurred");
+                    publish_event(DfuStatusEvent::new(DfuStatus::Error));
+                    DFU_WRITE_FAILED.store(false, Ordering::Release);
+                } else {
+                    info!("dfu: {} bytes written, verifying...", self.offset);
+                    if self.check_sanity_from_flash().await.is_err() {
+                        DFU_WRITE_FAILED.store(true, Ordering::Release);
+                        publish_event(DfuStatusEvent::new(DfuStatus::Error));
+                    } else {
+                        match self.mark_updated_and_reset().await {
+                            Ok(()) => info!("dfu: update complete, resetting"),
+                            Err(()) => {
+                                error!("dfu: firmware finish failed");
+                                publish_event(DfuStatusEvent::new(DfuStatus::Error));
                             }
                         }
-                    }
-                    DfuCmd::SystemReset => {
-                        #[cfg(all(
-                            target_arch = "arm",
-                            target_os = "none",
-                            any(target_abi = "eabi", target_abi = "eabihf")
-                        ))]
-                        cortex_m::peripheral::SCB::sys_reset();
                     }
                 }
             }
-            dfu_clear_busy_if_empty();
+            DfuCmd::SystemReset(DfuTarget::Central) => {
+                #[cfg(all(
+                    target_arch = "arm",
+                    target_os = "none",
+                    any(target_abi = "eabi", target_abi = "eabihf")
+                ))]
+                cortex_m::peripheral::SCB::sys_reset();
+            }
+            // Peripheral commands: skip — handled by the split forwarder
+            _ => {}
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// dfu_lock
-// ---------------------------------------------------------------------------
+/// `true` while DFU is locked (default). Cleared by `DfuLock` when unlock keys are pressed.
+#[cfg(feature = "dfu_lock")]
+static DFU_LOCKED: AtomicBool = AtomicBool::new(true);
+/// `true` once a DFU download command has been successfully enqueued.
+#[cfg(feature = "dfu_lock")]
+pub(crate) static DFU_STARTED: AtomicBool = AtomicBool::new(false);
+/// Signalled by `dfu_lock_check()` to wake the `DfuLock` unlock state machine.
+#[cfg(feature = "dfu_lock")]
+static DFU_UNLOCK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// DfuLock state machine that checks a physical key combination to unlock DFU.
+/// Physical-key gate that prevents accidental or unauthorised DFU downloads.
+///
+/// When enabled via the `dfu_lock` feature, every DFU download attempt
+/// (central or peripheral passthrough) first triggers [`DFU_UNLOCK_SIGNAL`].
+/// [`DfuLock`] picks up that signal, opens a 10 s unlock window, and polls
+/// the matrix at 50 ms intervals looking for the key combination configured
+/// in `unlock_keys`.  Once all listed keys are pressed simultaneously the
+/// global [`DFU_LOCKED`] flag is cleared and another 10 s countdown starts —
+/// the host must begin the actual download within that window, otherwise the
+/// lock engages again.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut dfu_lock = DfuLock::new(&[(0, 0), (1, 1)], &keymap);
+/// // in run_all!:
+/// dfu_lock,
+/// ```
 #[cfg(feature = "dfu_lock")]
 pub struct DfuLock<'a> {
-    unlocked: AtomicBool,
     unlock_keys: &'a [(u8, u8)],
     keymap: &'a crate::keymap::KeyMap<'a>,
 }
 
 #[cfg(feature = "dfu_lock")]
 impl<'a> DfuLock<'a> {
+    /// Create a new DFU lock.
+    ///
+    /// `unlock_keys` lists matrix positions `(row, col)` that must all be
+    /// held down simultaneously to unlock DFU.  `keymap` is used to read
+    /// the physical matrix state.
     pub fn new(unlock_keys: &'a [(u8, u8)], keymap: &'a crate::keymap::KeyMap<'a>) -> Self {
-        Self {
-            unlocked: AtomicBool::new(false),
-            unlock_keys,
-            keymap,
-        }
+        Self { unlock_keys, keymap }
     }
 
+    /// Run one unlock cycle: wait for a DFU activity signal, then poll the
+    /// matrix for the unlock combination.  If the keys are pressed within
+    /// 10 s the lock is cleared and a second 10 s window is opened for the
+    /// host to start the download.  Returns once the download begins or
+    /// either window expires.
     pub(crate) async fn process_unlock(&self) {
         DFU_UNLOCK_SIGNAL.wait().await;
 
@@ -429,7 +564,6 @@ impl<'a> DfuLock<'a> {
                 .iter()
                 .all(|(row, col)| self.keymap.read_matrix_key(*row, *col));
             if all_pressed {
-                self.unlocked.store(true, Ordering::Release);
                 DFU_LOCKED.store(false, Ordering::Release);
                 info!("dfu_lock: unlock keys pressed, DFU unlocked for 10 s");
                 publish_event(crate::event::DfuStatusEvent::new(DfuStatus::LockUnlocked));
@@ -454,7 +588,6 @@ impl<'a> DfuLock<'a> {
             if embassy_time::Instant::now() >= deadline {
                 info!("dfu_lock: unlock expired (10 s timeout)");
                 DFU_LOCKED.store(true, Ordering::Release);
-                self.unlocked.store(false, Ordering::Release);
                 publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Idle));
                 break;
             }
@@ -465,6 +598,7 @@ impl<'a> DfuLock<'a> {
 
 #[cfg(feature = "dfu_lock")]
 impl<'a> Runnable for DfuLock<'a> {
+    /// Runs the unlock loop forever — yields only between cycles.
     async fn run(&mut self) -> ! {
         loop {
             self.process_unlock().await;
