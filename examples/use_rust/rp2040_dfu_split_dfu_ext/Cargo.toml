@@ -23,6 +23,7 @@ defmt = "1"
 defmt-rtt = "1"
 panic-probe = { version = "1", features = ["print-defmt"] }
 embedded-storage = { version = "0.3", default-features = false }
+embedded-storage-async = { version = "0.4", default-features = false }
 
 [build-dependencies]
 const-gen = "1.6"

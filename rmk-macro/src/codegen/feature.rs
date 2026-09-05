@@ -58,5 +58,5 @@ pub(crate) fn is_feature_enabled(feature_list: &Option<Vec<String>>, feature: &s
 /// the partitions — is compiled in. All code referencing those partitions
 /// gates on this instead of re-deriving `dfu_rp || dfu_nrf`.
 pub(crate) fn defines_dfu_partitions() -> bool {
-    cfg!(feature = "dfu")
+    cfg!(feature = "_dfu")
 }

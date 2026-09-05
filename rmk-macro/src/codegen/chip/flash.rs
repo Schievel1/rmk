@@ -2,15 +2,15 @@
 //!
 
 use crate::codegen::feature::defines_dfu_partitions;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use crate::codegen::feature::is_feature_enabled;
 use proc_macro2::TokenStream as TokenStream2;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use quote::format_ident;
 use quote::quote;
 use rmk_config::resolved::Hardware;
 use rmk_config::resolved::hardware::{ChipSeries, DfuConfig};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use rmk_config::resolved::hardware::{ExternalFlashDriver, SpiConfig};
 
 pub(crate) fn expand_flash_init(hardware: &Hardware, dfu: Option<&DfuConfig>) -> TokenStream2 {
@@ -26,9 +26,9 @@ pub(crate) fn expand_flash_init(hardware: &Hardware, dfu: Option<&DfuConfig>) ->
 
         // With dfu, the flash is already a partition that starts at the
         // storage offset, so the relative offset must be 0.
-        #[cfg(feature = "dfu")]
+        #[cfg(feature = "_dfu")]
         let storage_start_addr = 0usize;
-        #[cfg(not(feature = "dfu"))]
+        #[cfg(not(feature = "_dfu"))]
         let storage_start_addr = _start_addr;
 
         quote! {
@@ -151,7 +151,7 @@ pub(crate) fn expand_flash_init(hardware: &Hardware, dfu: Option<&DfuConfig>) ->
 /// nRF takes the raw `NVMC` directly; RP2040 needs the blocking `Flash`
 /// wrapper sized by `rmk::dfu::FLASH_SIZE` (16 MB, matching the memory.x
 /// conventions).
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn expand_dfu_flash_driver(
     chip_series: &ChipSeries,
     flash_peripheral: &TokenStream2,
@@ -184,7 +184,7 @@ fn expand_dfu_flash_driver(
 /// The flash mutex is a local (`let`), not a leaked `'static`: the storage
 /// partition and the DFU/state partitions all borrow it, and every consumer
 /// lives in the same main task, so no `'static` is required.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn expand_dfu_partitions(
     chip_series: &ChipSeries,
     external_dfu: Option<&TokenStream2>,
@@ -208,7 +208,7 @@ fn expand_dfu_partitions(
     };
     quote! {
         let flash_mutex = ::rmk::dfu::FlashMutex::new(
-            core::cell::RefCell::new(#driver)
+            ::rmk::storage::async_flash_wrapper(#driver)
         );
         let (#storage_binding, mut state_partition, #dfu_binding) =
             ::rmk::dfu::partitions_from_linkerscript(&flash_mutex);
@@ -216,7 +216,7 @@ fn expand_dfu_partitions(
 }
 
 /// Generate the `DFU_UNLOCK_KEYS` constant from the resolved DFU config.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn expand_dfu_unlock_keys(dfu: &DfuConfig) -> TokenStream2 {
     if dfu.unlock_keys.is_empty() {
         return quote! {};
@@ -240,7 +240,7 @@ fn expand_dfu_unlock_keys(dfu: &DfuConfig) -> TokenStream2 {
 /// but the user crate lacks the `dfu_ext` cargo feature. Callers fall back to
 /// the internal-partition expansion so the build fails with this single error
 /// instead of follow-on resolution noise.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn dfu_ext_misconfig_error(dfu: Option<&DfuConfig>) -> Option<TokenStream2> {
     let configured = dfu.and_then(|d| d.external_flash.as_ref()).is_some();
     let enabled = is_feature_enabled(&crate::codegen::feature::get_rmk_features(), "dfu_ext");
@@ -263,7 +263,7 @@ fn dfu_ext_misconfig_error(dfu: Option<&DfuConfig>) -> Option<TokenStream2> {
 /// configured. A configured external flash without the `dfu_ext` feature is
 /// reported by [`dfu_ext_misconfig_error`] (which also forces this function
 /// down the internal-partition path so the expansion stays consistent).
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn expand_external_flash_init(
     chip_series: &ChipSeries,
     dfu: Option<&DfuConfig>,
@@ -301,13 +301,11 @@ fn expand_external_flash_init(
     Some(quote! {
         #spi_init
         #flash_init
-        let dfu_mutex = ::embassy_sync::blocking_mutex::Mutex::<
+        let dfu_mutex = ::embassy_sync::mutex::Mutex::<
             ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             _,
-        >::new(
-            core::cell::RefCell::new(ext_flash)
-        );
-        let dfu_partition = ::rmk::dfu::BlockingPartition::new(
+        >::new(ext_flash);
+        let dfu_partition = ::rmk::dfu::Partition::new(
             &dfu_mutex,
             0,
             #dfu_partition_size,
@@ -315,7 +313,7 @@ fn expand_external_flash_init(
     })
 }
 
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn expand_spi_init(chip_series: &ChipSeries, spi: &SpiConfig) -> TokenStream2 {
     let instance = format_ident!("{}", spi.instance);
     match chip_series {
@@ -324,12 +322,27 @@ fn expand_spi_init(chip_series: &ChipSeries, spi: &SpiConfig) -> TokenStream2 {
             let mosi = format_ident!("{}", spi.mosi);
             let miso = format_ident!("{}", spi.miso);
             let cs = format_ident!("{}", spi.cs.as_ref().unwrap());
+            let tx_dma = format_ident!(
+                "{}",
+                spi.tx_dma
+                    .as_ref()
+                    .expect("tx_dma required for async SPI on RP2040")
+            );
+            let rx_dma = format_ident!(
+                "{}",
+                spi.rx_dma
+                    .as_ref()
+                    .expect("rx_dma required for async SPI on RP2040")
+            );
             quote! {
-                let dfu_spi = ::embassy_rp::spi::Spi::new_blocking(
+                let dfu_spi = ::embassy_rp::spi::Spi::new(
                     p.#instance,
                     p.#sck,
                     p.#mosi,
                     p.#miso,
+                    p.#tx_dma,
+                    p.#rx_dma,
+                    Irqs,
                     ::embassy_rp::spi::Config::default(),
                 );
                 let dfu_cs = ::embassy_rp::gpio::Output::new(

@@ -52,7 +52,7 @@ async fn main(_spawner: Spawner) {
         config_matrix_pins_nrf!(peripherals: p, input: [P0_07, P0_22, P0_11, P0_12], output: [P0_13, P0_17, P0_20]);
 
     // Flash partition layout comes from the DFU symbols in memory.x.
-    let flash_mutex = FlashMutex::new(core::cell::RefCell::new(Nvmc::new(p.NVMC)));
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Nvmc::new(p.NVMC)));
     let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::new(
@@ -94,7 +94,7 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // Optional DFU lock — requires the `dfu_lock` Cargo feature.
     // Specify the physical keys to press simultaneously to unlock DFU firmware

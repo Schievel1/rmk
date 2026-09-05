@@ -84,6 +84,6 @@ led = "PIN_25"
 driver = "w25q"
 flash_size = 8388608
 dfu_partition_size = 8388608
-spi = { instance = "SPI0", sck = "PIN_18", mosi = "PIN_19", miso = "PIN_16", cs = "PIN_17" }
+spi = { instance = "SPI0", sck = "PIN_18", mosi = "PIN_19", miso = "PIN_16", cs = "PIN_17", tx_dma = "DMA_CH3", rx_dma = "DMA_CH4" }
 
 [storage]

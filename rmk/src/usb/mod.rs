@@ -1,4 +1,4 @@
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use core::sync::atomic::Ordering;
 
 use embassy_futures::join::join5;
@@ -6,20 +6,20 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
 #[cfg(feature = "usb_log")]
 use embassy_usb::class::cdc_acm::CdcAcmClass;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use embassy_usb::class::dfu::consts::{DfuAttributes, Status};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use embassy_usb::class::dfu::dfu_mode::{self, DfuState};
 use embassy_usb::class::hid::{HidProtocolMode, HidReader, HidReaderWriter, HidWriter, ReportId, RequestHandler};
 use embassy_usb::control::OutResponse;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use embassy_usb::control::{InResponse, Request};
 use embassy_usb::driver::{Driver, EndpointError};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use embassy_usb::types::{InterfaceNumber, StringIndex};
 use embassy_usb::{Builder, Handler, UsbDevice};
 use rmk_types::connection::{ConnectionType, UsbState};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use rmk_types::dfu::DfuStatus;
 use static_cell::StaticCell;
 use usbd_hid::descriptor::AsInputReport;
@@ -28,11 +28,13 @@ use crate::RawMutex;
 use crate::channel::USB_REPORT_CHANNEL;
 use crate::config::DeviceConfig;
 use crate::core_traits::Runnable;
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
+use crate::dfu::DFU_WRITE_ERRORS;
+#[cfg(feature = "_dfu")]
 use crate::dfu::{BLOCK_SIZE_DFU, DFU_BUSY, DfuCmd, dfu_push};
 #[cfg(feature = "dfu_split")]
 use crate::dfu::{MAX_PASSTHROUGH_ALTS, PassthroughDfuHandler};
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 use crate::event::{DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
 use crate::hid::StenoReport;
@@ -183,7 +185,7 @@ impl<'d, D: Driver<'d>> HidWriterTrait for UsbKeyboardWriter<'_, 'd, D> {
 const DEFAULT_CONFIG_DESC_SIZE: usize = if cfg!(any(
     feature = "usb_log",
     feature = "steno",
-    feature = "dfu",
+    feature = "_dfu",
     feature = "rynk",
     all(feature = "dongle", not(feature = "vial"))
 )) {
@@ -229,9 +231,9 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
     usb_config.composite_with_iads = true;
 
     // Control buffer must be large enough for the largest DFU transfer block.
-    #[cfg(feature = "dfu")]
+    #[cfg(feature = "_dfu")]
     const CONTROL_BUF_SIZE: usize = crate::dfu::BLOCK_SIZE_DFU;
-    #[cfg(not(feature = "dfu"))]
+    #[cfg(not(feature = "_dfu"))]
     const CONTROL_BUF_SIZE: usize = DEFAULT_CONFIG_DESC_SIZE;
 
     // The rynk MS OS 2.0 descriptor set (WinUSB binding) takes ~178 bytes, and
@@ -270,10 +272,10 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
 /// [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task through the
 /// command channel. The DFU lock gate (if enabled) is checked here so every
 /// DFU start path shares one place.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 struct UsbProxyDfuHandler;
 
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 impl dfu_mode::Handler for UsbProxyDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
         crate::dfu::dfu_lock_check()?;
@@ -283,6 +285,10 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Status> {
+        if DFU_WRITE_ERRORS.load(Ordering::Acquire) > 0 {
+            DFU_WRITE_ERRORS.store(0, Ordering::Release);
+            return Err(Status::ErrWrite);
+        }
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         let mut buf: heapless::Vec<u8, { BLOCK_SIZE_DFU }> = heapless::Vec::new();
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
@@ -290,6 +296,10 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
     }
 
     fn finish(&mut self) -> Result<(), Status> {
+        if DFU_WRITE_ERRORS.load(Ordering::Acquire) > 0 {
+            DFU_WRITE_ERRORS.store(0, Ordering::Release);
+            return Err(Status::ErrWrite);
+        }
         if dfu_push(DfuCmd::Finish).is_err() {
             error!("dfu: DFU command queue full at finish");
             publish_event(DfuStatusEvent::new(DfuStatus::Error));
@@ -313,7 +323,7 @@ impl dfu_mode::Handler for UsbProxyDfuHandler {
 /// central's USB port. Routes by the current alternate setting and injects
 /// adaptive host-side flow control (`dfuDNBUSY`) while the forward queues are
 /// non-empty.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 struct UsbDfuIface {
     central: DfuState<UsbProxyDfuHandler>,
     #[cfg(feature = "dfu_split")]
@@ -321,7 +331,7 @@ struct UsbDfuIface {
     current_alt: u8,
 }
 
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 impl Handler for UsbDfuIface {
     fn set_alternate_setting(&mut self, _iface: InterfaceNumber, alternate_setting: u8) {
         self.current_alt = alternate_setting;
@@ -368,7 +378,7 @@ impl Handler for UsbDfuIface {
     }
 }
 
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 impl UsbDfuIface {
     #[cfg(feature = "dfu_split")]
     fn passthrough_slot(&mut self, alt: u8) -> Option<&mut DfuState<PassthroughDfuHandler>> {
@@ -381,13 +391,13 @@ impl UsbDfuIface {
 ///
 /// DFU hosts (e.g. dfu-util) show this string in place of the raw index; it is
 /// parked alongside [`UsbDfuIface`] so it lives for the USB device's lifetime.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 struct DfuStringProvider {
     string_idx: StringIndex,
     string_val: &'static str,
 }
 
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 impl Handler for DfuStringProvider {
     fn control_out(&mut self, _req: Request, _data: &[u8]) -> Option<OutResponse> {
         None
@@ -407,7 +417,7 @@ impl Handler for DfuStringProvider {
 /// peripherals (requires `dfu_split`). The parked proxy ([`UsbDfuIface`]) does
 /// all routing and never touches flash — downloads flow through the command
 /// channel to the [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task.
-#[cfg(feature = "dfu")]
+#[cfg(feature = "_dfu")]
 fn register_dfu_iface<D: Driver<'static>>(
     builder: &mut Builder<'static, D>,
     product_name: &'static str,
@@ -594,7 +604,7 @@ impl<D: Driver<'static>> UsbTransportBuilder<D> {
         #[cfg(feature = "usb_log")]
         let logger = add_usb_logger!(&mut builder);
 
-        #[cfg(feature = "dfu")]
+        #[cfg(feature = "_dfu")]
         register_dfu_iface(
             &mut builder,
             device_config.product_name,
@@ -763,7 +773,7 @@ async fn run_usb_logger<D: Driver<'static>>(logger_class: CdcAcmClass<'static, D
     logger_fut.await;
 }
 
-#[cfg(any(feature = "usb_log", feature = "dfu"))]
+#[cfg(any(feature = "usb_log", feature = "_dfu"))]
 pub async fn run_peripheral_usb<D: Driver<'static>>(driver: D, config: DeviceConfig<'static>) {
     let mut builder = new_usb_builder(driver, config, default_config_descriptor());
 
@@ -772,7 +782,7 @@ pub async fn run_peripheral_usb<D: Driver<'static>>(driver: D, config: DeviceCon
     #[cfg(not(feature = "usb_log"))]
     let logger_fut = ::core::future::pending::<()>();
 
-    #[cfg(feature = "dfu")]
+    #[cfg(feature = "_dfu")]
     register_dfu_iface(
         &mut builder,
         config.product_name,

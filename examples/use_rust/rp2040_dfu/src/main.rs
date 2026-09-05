@@ -24,6 +24,7 @@ use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::wpm::WpmProcessor;
+use rmk::storage::async_flash_wrapper;
 use rmk::usb::UsbTransport;
 use rmk::watchdog::Rp2040Watchdog;
 use rmk::{KeymapData, initialize_keymap_and_storage, run_all};
@@ -45,9 +46,11 @@ async fn main(_spawner: Spawner) {
         config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7, PIN_8, PIN_9], output: [PIN_19, PIN_20, PIN_21]);
 
     // Flash partition layout comes from the DFU symbols in memory.x.
-    let flash_mutex = FlashMutex::new(core::cell::RefCell::new(
-        Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(p.FLASH),
-    ));
+    let flash_mutex = FlashMutex::new(async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
     let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor =
@@ -87,7 +90,7 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // Optional DFU lock — requires the `dfu_lock` Cargo feature.
     // Specify the physical keys to press simultaneously to unlock DFU firmware

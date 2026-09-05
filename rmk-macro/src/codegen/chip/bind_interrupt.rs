@@ -339,8 +339,32 @@ pub(crate) fn bind_interrupt_default(
             } else {
                 quote! {}
             };
+            // DFU external SPI flash DMA channels
+            let dfu_dma_channels = dfu
+                .and_then(|d| d.external_flash.as_ref())
+                .map(|ext| {
+                    let tx = format_ident!(
+                        "{}",
+                        ext.spi
+                            .tx_dma
+                            .as_ref()
+                            .expect("dfu.external_flash.spi.tx_dma is required for RP2040")
+                    );
+                    let rx = format_ident!(
+                        "{}",
+                        ext.spi
+                            .rx_dma
+                            .as_ref()
+                            .expect("dfu.external_flash.spi.rx_dma is required for RP2040")
+                    );
+                    quote! {
+                        , ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#tx>
+                        , ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#rx>
+                    }
+                })
+                .unwrap_or_default();
             let dma_irq_0 = quote! {
-                DMA_IRQ_0 => ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::DMA_CH0>, ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::DMA_CH1> #dma_ch2;
+                DMA_IRQ_0 => ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::DMA_CH0>, ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::DMA_CH1> #dma_ch2 #dfu_dma_channels;
             };
             // For Pico W, enabled PIO0_IRQ_0 interrupt
             let (pio0_irq_0, ble_task) = if communication.ble_enabled() {

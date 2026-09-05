@@ -54,9 +54,11 @@ async fn main(_spawner: Spawner) {
 
     let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7], output: [PIN_19, PIN_20]);
 
-    let flash_mutex = FlashMutex::new(core::cell::RefCell::new(
-        Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(p.FLASH),
-    ));
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
     let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let keyboard_device_config = DeviceConfig {
@@ -94,7 +96,7 @@ async fn main(_spawner: Spawner) {
     .await;
 
     // mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // DFU LED processor, optional. Flashes the LED when DFU is active
     let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
