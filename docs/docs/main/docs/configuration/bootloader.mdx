@@ -43,18 +43,15 @@ unlock_keys = [[0, 0], [1, 1]]
 
 ```rust title="main.rs"
 use core::cell::RefCell;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashMutex, FlashDfuHandler, partitions_from_linkerscript};
 
 // Flash partitions come from the DFU symbols in memory.x.
 let flash_mutex = FlashMutex::new(RefCell::new(Flash::new_blocking(p.FLASH)));
-let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
+let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
 // Optional: assign a DFU activity LED
 let mut dfu_led_processor =
     rmk::processor::builtin::dfu_led::DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
-
-// Mark boot as successful (so bootloader doesn't revert on reset)
-rmk::dfu::mark_booted(&mut state_partition);
 
 // Optional: DFU lock with physical key unlock. Requires the `dfu_lock` Cargo feature.
 let unlock_keys: &[(u8, u8)] = &[(0, 0), (1, 1)];
@@ -62,7 +59,7 @@ let mut dfu_lock = ::rmk::dfu::DfuLock::new(unlock_keys, &keymap);
 
 // Build the USB transport. The DFU interface is registered internally by the
 // transport and flashes through the DFU task; add the interface to run_all!().
-let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
 let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config);
 
 run_all!(
@@ -104,11 +101,11 @@ unlock_keys = [[0, 0], [1, 1]]
 ```rust title="main.rs"
 use core::cell::RefCell;
 use embassy_nrf::nvmc::Nvmc;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashMutex, FlashDfuHandler, partitions_from_linkerscript};
 
 // Flash partitions come from the DFU symbols in memory.x.
 let flash_mutex = FlashMutex::new(RefCell::new(Nvmc::new(p.NVMC)));
-let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
+let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
 // Optional: assign a DFU activity LED
 let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::new(
@@ -116,16 +113,13 @@ let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::n
     false,
 );
 
-// Mark boot as successful (so bootloader doesn't revert on reset)
-rmk::dfu::mark_booted(&mut state_partition);
-
 // Optional: DFU lock with physical key unlock. Requires the `dfu_lock` Cargo feature.
 let unlock_keys: &[(u8, u8)] = &[(0, 0), (1, 1)];
 let mut dfu_lock = ::rmk::dfu::DfuLock::new(unlock_keys, &keymap);
 
 // Build the USB transport. The DFU interface is registered internally by the
 // transport and flashes through the DFU task; add the interface to run_all!().
-let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
 let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config);
 
 run_all!(
@@ -139,6 +133,10 @@ run_all!(
 
 </Tab>
 </Tabs>
+
+::: tip mark_booted is automatic
+When using `FlashDfuHandler` (in `run_all!`) or `run_rmk_split_peripheral()`, `mark_booted()` is called automatically — no manual call needed. You only need `rmk::dfu::mark_booted(&mut state_partition)` when using a embassy-boot based bootloader to flash the firmware that still provides safe firmware updates and rollback.  E.g. rmk-boot's DFU flash feature without it's `noswap` feature and you don't use DFU flashing/ `FlashDfuHandler` in RMK itself.
+:::
 
 ## Partition layout
 
@@ -283,7 +281,7 @@ use embassy_rp::gpio::Output;
 use embassy_rp::spi::{self, Spi};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashMutex, FlashDfuHandler, partitions_from_linkerscript};
 use rmk::driver::w25q::W25qNorFlash;
 
 // External DFU flash via SPI
@@ -301,11 +299,9 @@ let dfu_partition = ExternalPartition::new(&dfu_mutex, 0, 2 * 1024 * 1024);
 // Internal flash provides the boot state and storage partitions — the
 // internal DFU partition from the linkerscript layout is discarded.
 let flash_mutex = FlashMutex::new(RefCell::new(Flash::new_blocking(p.FLASH)));
-let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
+let (storage_partition, state_partition, _) = partitions_from_linkerscript(&flash_mutex);
 
-rmk::dfu::mark_booted(&mut state_partition);
-
-let mut dfu_iface = rmk::dfu::RmkDfuInterface::new(dfu_partition, state_partition);
+let mut dfu_iface = rmk::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
 let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config);
 
 run_all!(

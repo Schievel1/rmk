@@ -62,7 +62,9 @@ pub async fn run_rmk_split_peripheral<
         let mut peripheral = SplitPeripheral::new(SerialSplitDriver::new(serial));
 
         #[cfg(all(feature = "dfu_split", not(feature = "_ble")))]
-        let mut dfu_handler = crate::dfu::SplitDfuHandler::new(dfu_partition, state_partition);
+        let mut dfu_handler = crate::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
+        #[cfg(all(feature = "dfu_split", not(feature = "_ble")))]
+        dfu_handler.mark_booted().await;
 
         loop {
             peripheral
@@ -104,7 +106,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
         #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] STATE: NorFlash + Clone,
     >(
         &mut self,
-        #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] dfu_handler: &mut crate::dfu::SplitDfuHandler<
+        #[cfg(all(feature = "dfu_split", not(feature = "_ble")))] dfu_handler: &mut crate::dfu::FlashDfuHandler<
             DFU,
             STATE,
         >,
@@ -260,6 +262,11 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                                 embassy_time::Timer::after_millis(50).await;
                                 dfu_handler.mark_updated_and_reset().await.ok();
                             }
+                        }
+                        #[cfg(feature = "dfu_split")]
+                        SplitMessage::SystemReset => {
+                            info!("dfu_split: received system reset from central");
+                            cortex_m::peripheral::SCB::sys_reset();
                         }
                         _ => (),
                     },

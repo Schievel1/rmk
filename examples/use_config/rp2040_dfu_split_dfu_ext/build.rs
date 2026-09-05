@@ -29,14 +29,11 @@ fn main() {
 
     // Per-binary linker scripts: memory layout + standard link.x + defmt.x
     println!("cargo:rustc-link-arg-bin=central=-Tmemory-central.x");
-    println!("cargo:rustc-link-arg-bin=central=-Tlink.x");
-    println!("cargo:rustc-link-arg-bin=central=-Tdefmt.x");
-    println!("cargo:rustc-link-arg-bin=central=--nmagic");
-
     println!("cargo:rustc-link-arg-bin=peripheral=-Tmemory-peripheral.x");
-    println!("cargo:rustc-link-arg-bin=peripheral=-Tlink.x");
-    println!("cargo:rustc-link-arg-bin=peripheral=-Tdefmt.x");
-    println!("cargo:rustc-link-arg-bin=peripheral=--nmagic");
+
+    println!("cargo:rustc-link-arg=--nmagic");
+    println!("cargo:rustc-link-arg=-Tlink.x");
+    println!("cargo:rustc-link-arg=-Tdefmt.x");
 
     println!("cargo:rerun-if-changed=memory-central.x");
     println!("cargo:rerun-if-changed=memory-peripheral.x");

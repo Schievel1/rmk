@@ -19,7 +19,7 @@ use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
 use rmk::matrix::Matrix;
@@ -51,7 +51,7 @@ async fn main(_spawner: Spawner) {
         embassy_rp::flash::Blocking,
         { rmk::dfu::FLASH_SIZE },
     >::new_blocking(p.FLASH)));
-    let (storage_partition, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
+    let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor =
         rmk::processor::builtin::dfu_led::DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
@@ -90,8 +90,6 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    rmk::dfu::mark_booted(&mut state_partition).await;
-
     // Optional DFU lock — requires the `dfu_lock` Cargo feature.
     // Specify the physical keys to press simultaneously to unlock DFU firmware
     // download. The keys are (row, col) pairs matching your matrix layout.
@@ -107,7 +105,7 @@ async fn main(_spawner: Spawner) {
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 
