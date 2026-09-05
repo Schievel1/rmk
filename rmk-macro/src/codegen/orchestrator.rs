@@ -15,7 +15,7 @@ use super::chip::flash::expand_flash_init;
 use super::chip::gpio::expand_output_config;
 use super::display::expand_display_config;
 use super::entry::expand_rmk_entry;
-use super::feature::{get_rmk_features, is_feature_enabled};
+use super::feature::{defines_dfu_partitions, get_rmk_features, is_feature_enabled};
 use super::import::expand_custom_imports;
 use super::input_device::expand_input_device_config;
 use super::keyboard_config::{
@@ -285,10 +285,10 @@ fn expand_main(
 ) -> TokenStream2 {
     // Expand components of main function
     let imports = expand_custom_imports(&item_mod);
-    let bind_interrupt = expand_bind_interrupt(hardware, &item_mod);
+    let bind_interrupt = expand_bind_interrupt(hardware, &item_mod, hardware.dfu.as_ref());
     let chip_init = expand_chip_init(hardware, None, &item_mod);
     let usb_init = expand_usb_init(hardware, &item_mod);
-    let flash_init = expand_flash_init(hardware);
+    let flash_init = expand_flash_init(hardware, hardware.dfu.as_ref());
     let behavior_config = expand_behavior_config(behavior);
     let matrix_config = expand_matrix_config(hardware, rmk_features);
     let output_config = expand_output_config(hardware);
@@ -298,7 +298,7 @@ fn expand_main(
     let (input_device_config, devices, processors) = expand_input_device_config(hardware);
     let matrix_and_keyboard = expand_matrix_and_keyboard_init(hardware);
     let (registered_processor_initializers, mut registered_processors) =
-        expand_registered_processor_init(hardware, &item_mod, rmk_features);
+        expand_registered_processor_init(hardware, &item_mod);
 
     // Declare dfu_lock (if enabled) so it can be pushed as a Runnable task.
     // Check the feature at macro-expansion time so we never emit `#[cfg]`
@@ -421,6 +421,15 @@ fn expand_main(
         }
     };
 
+    // `state_partition` exists (from the flash init) exactly when DFU codegen
+    // ran, so gate on that instead of a `#[cfg]` — a cfg inside the emitted
+    // code would evaluate against the user crate's features.
+    let mark = if defines_dfu_partitions() {
+        quote! { ::rmk::dfu::mark_booted(&mut state_partition); }
+    } else {
+        quote! {}
+    };
+
     quote! {
         #imports
 
@@ -442,7 +451,7 @@ fn expand_main(
             // Initialize static output pins
             #output_config
 
-            // Initialize flash driver as `flash` and storage config as `storage_config`
+            // Initialize flash driver as `storage_partition` and storage config as `storage_config`
             #flash_init
 
             // Initialize ble config as `ble_battery_config`
@@ -459,6 +468,11 @@ fn expand_main(
 
             // Initialize the storage and keymap, as `storage` and `keymap`
             #keymap_and_storage
+
+            // Mark the firmware as booted so the bootloader stops rolling
+            // back. Only emitted with a DFU chip feature (`dfu_rp`/`dfu_nrf`),
+            // where `state_partition` exists from the flash init above.
+            #mark
 
             // Initialize the matrix + keyboard, as `matrix` and `keyboard`
             #matrix_and_keyboard
@@ -567,22 +581,16 @@ pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, keymap: &Keymap) ->
     };
 
     if hardware.storage.is_some() {
-        #[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-        let mark = quote! { ::rmk::dfu::mark_booted(); };
-        #[cfg(not(any(feature = "dfu_rp", feature = "dfu_nrf")))]
-        let mark = quote! {};
-
         quote! {
             #initialize_positional_config
             #keymap_data_init
             let (keymap, mut storage) = ::rmk::initialize_keymap_and_storage(
                 &mut keymap_data,
-                flash,
+                storage_partition,
                 &rmk_config.storage_config,
                 &mut behavior_config,
                 &per_key_config,
             ).await;
-            #mark
         }
     } else {
         quote! {
