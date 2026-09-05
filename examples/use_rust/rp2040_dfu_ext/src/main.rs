@@ -1,0 +1,205 @@
+#![no_main]
+#![no_std]
+
+#[macro_use]
+mod keymap;
+#[macro_use]
+mod macros;
+mod vial;
+
+use core::cell::RefCell;
+
+use defmt::{debug, info};
+use defmt_rtt as _;
+use embassy_embedded_hal::flash::partition::BlockingPartition;
+use embassy_executor::Spawner;
+use embassy_rp::flash::Flash;
+use embassy_rp::gpio::{Input, Level, Output};
+use embassy_rp::spi::{self, Spi};
+use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_rp::{bind_interrupts, peripherals};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embedded_storage::nor_flash::ReadNorFlash;
+use keymap::{COL, ROW};
+use panic_probe as _;
+use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
+use rmk::debounce::default_debouncer::DefaultDebouncer;
+use rmk::dfu::{FlashMutex, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::driver::w25q::W25qNorFlash;
+use rmk::host::HostService;
+use rmk::keyboard::Keyboard;
+use rmk::matrix::Matrix;
+use rmk::processor::builtin::wpm::WpmProcessor;
+use rmk::usb::UsbTransport;
+use rmk::{KeymapData, initialize_keymap_and_storage, run_all};
+use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
+
+bind_interrupts!(struct Irqs {
+    USBCTRL_IRQ => InterruptHandler<peripherals::USB>;
+});
+
+// External SPI flash (25-series NOR, e.g. W25Q64), used as the DFU download
+// slot. `spi::Spi<'static, ...>` + `Output<'static>` must match the concrete
+// driver types below.
+type ExternalFlash = W25qNorFlash<spi::Spi<'static, peripherals::SPI0, spi::Blocking>, Output<'static>>;
+type ExternalPartition<'a> = BlockingPartition<'a, CriticalSectionRawMutex, ExternalFlash>;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    info!("RMK DFU ext start!");
+    let p = embassy_rp::init(Default::default());
+
+    let driver = Driver::new(p.USB, Irqs);
+
+    // Matrix pins. PIN_16–19 are used by the external DFU flash (SPI0) and
+    // PIN_25 by the DFU LED, so the matrix uses other pins.
+    let (row_pins, col_pins) =
+        config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7, PIN_8, PIN_9], output: [PIN_10, PIN_11, PIN_12]);
+
+    // External DFU flash via SPI0
+    // Match the wiring and the bootloader pins (src/rp2040.rs) accordingly.
+    let dfu_spi = Spi::new_blocking(p.SPI0, p.PIN_18, p.PIN_19, p.PIN_16, spi::Config::default());
+    let dfu_cs = Output::new(p.PIN_17, Level::High);
+    let ext_flash = ExternalFlash::new(dfu_spi, dfu_cs, 8 * 1024 * 1024);
+
+    // Park the external flash behind a mutex. The external flash becomes the
+    // DFU download partition; the internal flash only holds the boot state
+    // and storage partitions. Offsets come from the DFU symbols in memory.x.
+    let dfu_mutex = Mutex::new(RefCell::new(ext_flash));
+    let dfu_partition = ExternalPartition::new(&dfu_mutex, 0, dfu_mutex.lock(|c| c.borrow().capacity() as u32));
+
+    // Internal flash: only the boot state and storage partitions are used, so
+    // the internal DFU partition from the linkerscript layout is discarded.
+    let flash_mutex = FlashMutex::new(RefCell::new(Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(
+        p.FLASH,
+    )));
+    let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
+
+    let mut dfu_led_processor =
+        rmk::processor::builtin::dfu_led::DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
+
+    let keyboard_device_config = DeviceConfig {
+        vid: 0x4c4b,
+        pid: 0x4643,
+        manufacturer: "Haobo",
+        product_name: "RMK Keyboard RP2040 DFU ext",
+        serial_number: "vial:f64c2b3c:000001",
+    };
+
+    let vial_config = VialConfig::new(VIAL_KEYBOARD_ID, VIAL_KEYBOARD_DEF, &[(0, 0), (1, 1)]);
+
+    let rmk_config = RmkConfig {
+        device_config: keyboard_device_config,
+        vial_config,
+        ..Default::default()
+    };
+
+    let mut keymap_data = KeymapData::new(keymap::get_default_keymap());
+    let storage_config = StorageConfig {
+        num_sectors: 8,
+        start_addr: 0,
+        clear_storage: false,
+        clear_layout: false,
+    };
+    let mut behavior_config = BehaviorConfig::default();
+    let per_key_config = PositionalConfig::default();
+    let (keymap, mut storage) = initialize_keymap_and_storage(
+        &mut keymap_data,
+        storage_partition,
+        &storage_config,
+        &mut behavior_config,
+        &per_key_config,
+    )
+    .await;
+
+    rmk::dfu::mark_booted(&mut state_partition);
+
+    ext_flash_selftest(&dfu_mutex);
+
+    let debouncer = DefaultDebouncer::new();
+    let mut matrix = Matrix::<_, _, _, ROW, COL, true>::new(row_pins, col_pins, debouncer);
+    let mut keyboard = Keyboard::new(&keymap);
+    let host_service = HostService::new(&keymap, &rmk_config);
+
+    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
+    let mut wpm_processor = WpmProcessor::new();
+
+    run_all!(
+        matrix,
+        storage,
+        usb_transport,
+        dfu_iface,
+        wpm_processor,
+        keyboard,
+        dfu_led_processor,
+    )
+    .await;
+}
+
+/// One-shot self-test of the external SPI flash (the DFU download partition):
+/// erase a 64 KiB region, write a deterministic pattern, read it back and
+/// compare. Erases the region again so the DFU partition is left clean.
+fn ext_flash_selftest(dfu_mutex: &Mutex<CriticalSectionRawMutex, RefCell<ExternalFlash>>) {
+    use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+
+    const REGION_START: u32 = 0;
+    const REGION_LEN: u32 = 64 * 1024;
+    const CHUNK: usize = 256;
+
+    let mut page = [0u8; CHUNK];
+
+    info!(
+        "[selftest] external flash: testing 0x{:x}..0x{:x}",
+        REGION_START,
+        REGION_START + REGION_LEN
+    );
+
+    dfu_mutex.lock(|cell| {
+        let mut flash = cell.borrow_mut();
+
+        if flash.erase(REGION_START, REGION_START + REGION_LEN).is_err() {
+            defmt::error!("[selftest] initial erase failed");
+            panic!("external flash selftest failed");
+        }
+
+        for addr in (REGION_START..REGION_START + REGION_LEN).step_by(CHUNK) {
+            for (j, b) in page.iter_mut().enumerate() {
+                *b = ((addr as usize + j) % 256) as u8;
+            }
+            debug!("[selftest] write 0x{:x}: {:?} ...", addr, &page[..8]);
+            if flash.write(addr, &page).is_err() {
+                defmt::error!("[selftest] write failed at 0x{:x}", addr);
+                panic!("external flash selftest failed");
+            }
+        }
+
+        for addr in (REGION_START..REGION_START + REGION_LEN).step_by(CHUNK) {
+            if flash.read(addr, &mut page).is_err() {
+                defmt::error!("[selftest] read failed at 0x{:x}", addr);
+                panic!("external flash selftest failed");
+            }
+            debug!("[selftest] read  0x{:x}: {:?} ...", addr, &page[..8]);
+            for (j, &b) in page.iter().enumerate() {
+                let expected = ((addr as usize + j) % 256) as u8;
+                if b != expected {
+                    defmt::error!(
+                        "[selftest] mismatch at 0x{:x}: got 0x{:x}, want 0x{:x}",
+                        addr + j as u32,
+                        b,
+                        expected
+                    );
+                    panic!("external flash selftest failed");
+                }
+            }
+        }
+
+        if flash.erase(REGION_START, REGION_START + REGION_LEN).is_err() {
+            defmt::error!("[selftest] final erase failed");
+            panic!("external flash selftest failed");
+        }
+    });
+
+    info!("[selftest] external flash read/write test OK");
+}

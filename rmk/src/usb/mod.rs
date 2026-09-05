@@ -1,13 +1,26 @@
+#[cfg(feature = "dfu")]
+use core::sync::atomic::Ordering;
+
 use embassy_futures::join::join5;
 use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
 #[cfg(feature = "usb_log")]
 use embassy_usb::class::cdc_acm::CdcAcmClass;
+#[cfg(feature = "dfu")]
+use embassy_usb::class::dfu::consts::{DfuAttributes, Status};
+#[cfg(feature = "dfu")]
+use embassy_usb::class::dfu::dfu_mode::{self, DfuState};
 use embassy_usb::class::hid::{HidProtocolMode, HidReader, HidReaderWriter, HidWriter, ReportId, RequestHandler};
 use embassy_usb::control::OutResponse;
+#[cfg(feature = "dfu")]
+use embassy_usb::control::{InResponse, Request};
 use embassy_usb::driver::{Driver, EndpointError};
+#[cfg(feature = "dfu")]
+use embassy_usb::types::{InterfaceNumber, StringIndex};
 use embassy_usb::{Builder, Handler, UsbDevice};
 use rmk_types::connection::{ConnectionType, UsbState};
+#[cfg(feature = "dfu")]
+use rmk_types::dfu::DfuStatus;
 use static_cell::StaticCell;
 use usbd_hid::descriptor::AsInputReport;
 
@@ -15,6 +28,12 @@ use crate::RawMutex;
 use crate::channel::USB_REPORT_CHANNEL;
 use crate::config::DeviceConfig;
 use crate::core_traits::Runnable;
+#[cfg(feature = "dfu")]
+use crate::dfu::{BLOCK_SIZE_DFU, DFU_BUSY, DfuCmd, dfu_push};
+#[cfg(feature = "dfu_split")]
+use crate::dfu::{MAX_PASSTHROUGH_ALTS, PassthroughDfuHandler};
+#[cfg(feature = "dfu")]
+use crate::event::{DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
 use crate::hid::StenoReport;
 use crate::hid::{
@@ -240,6 +259,228 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
     builder
 }
 
+// ---------------------------------------------------------------------------
+// DFU proxy — USB-side alternate settings that forward to the async updater
+// ---------------------------------------------------------------------------
+
+/// Synchronous DFU handler for the device's own alt setting (alt 0).
+///
+/// Runs inside the USB interrupt. It never touches flash: every download
+/// `start`/`write`/`finish`/`system_reset` is forwarded to the async
+/// [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task through the
+/// command channel. The DFU lock gate (if enabled) is checked here so every
+/// DFU start path shares one place.
+#[cfg(feature = "dfu")]
+struct UsbProxyDfuHandler;
+
+#[cfg(feature = "dfu")]
+impl dfu_mode::Handler for UsbProxyDfuHandler {
+    fn start(&mut self) -> Result<(), Status> {
+        crate::dfu::dfu_lock_check()?;
+        publish_event(DfuStatusEvent::new(DfuStatus::Started));
+        info!("dfu: DFU download started (central)");
+        dfu_push(DfuCmd::Start).map_err(|_| Status::ErrUnknown)
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), Status> {
+        publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
+        let mut buf: heapless::Vec<u8, { BLOCK_SIZE_DFU }> = heapless::Vec::new();
+        buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
+        dfu_push(DfuCmd::Write(buf)).map_err(|_| Status::ErrUnknown)
+    }
+
+    fn finish(&mut self) -> Result<(), Status> {
+        if dfu_push(DfuCmd::Finish).is_err() {
+            error!("dfu: DFU command queue full at finish");
+            publish_event(DfuStatusEvent::new(DfuStatus::Error));
+            return Err(Status::ErrUnknown);
+        }
+        publish_event(DfuStatusEvent::new(DfuStatus::Finished));
+        info!("dfu: DFU download complete");
+        Ok(())
+    }
+
+    fn system_reset(&mut self) {
+        let _ = dfu_push(DfuCmd::SystemReset);
+    }
+}
+
+/// Owner of every DFU alternate setting registered on a single USB interface.
+///
+/// Alt 0 is the device's own DFU download (forwarded by [`UsbProxyDfuHandler`]
+/// to the async updater); alt 1..N are passthrough slots for split
+/// peripherals (requires `dfu_split`), so a peripheral can be updated over the
+/// central's USB port. Routes by the current alternate setting and injects
+/// adaptive host-side flow control (`dfuDNBUSY`) while the forward queues are
+/// non-empty.
+#[cfg(feature = "dfu")]
+struct UsbDfuIface {
+    central: DfuState<UsbProxyDfuHandler>,
+    #[cfg(feature = "dfu_split")]
+    passthrough: [Option<DfuState<PassthroughDfuHandler>>; MAX_PASSTHROUGH_ALTS],
+    current_alt: u8,
+}
+
+#[cfg(feature = "dfu")]
+impl Handler for UsbDfuIface {
+    fn set_alternate_setting(&mut self, _iface: InterfaceNumber, alternate_setting: u8) {
+        self.current_alt = alternate_setting;
+    }
+
+    fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
+        match self.current_alt {
+            0 => self.central.control_out(req, data),
+            #[cfg(feature = "dfu_split")]
+            n => self.passthrough_slot(n)?.control_out(req, data),
+            #[cfg(not(feature = "dfu_split"))]
+            _ => None,
+        }
+    }
+
+    fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        match self.current_alt {
+            0 => {
+                // ── Flow control: dfuDNBUSY override ────────────────────────
+                // Byte 4 of the 6-byte GETSTATUS response is the DFU state.
+                // While the updater queue is non-empty we override it with
+                // 4 (= dfuDNBUSY) so the host polls again after 50 ms instead
+                // of queueing more 512B blocks. The store is volatile because
+                // `buf` is still borrowed by `resp`.
+                let buf_ptr = buf.as_mut_ptr();
+                let resp = self.central.control_in(req, buf);
+                if resp.is_some() && DFU_BUSY.load(Ordering::Acquire) {
+                    unsafe { core::ptr::write_volatile(buf_ptr.add(4), 4u8) };
+                }
+                resp
+            }
+            #[cfg(feature = "dfu_split")]
+            n => {
+                let buf_ptr = buf.as_mut_ptr();
+                let resp = self.passthrough_slot(n)?.control_in(req, buf);
+                if resp.is_some() && crate::dfu::PASSTHROUGH_TARGET.load(Ordering::Acquire) != usize::MAX {
+                    unsafe { core::ptr::write_volatile(buf_ptr.add(4), 4u8) };
+                }
+                resp
+            }
+            #[cfg(not(feature = "dfu_split"))]
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "dfu")]
+impl UsbDfuIface {
+    #[cfg(feature = "dfu_split")]
+    fn passthrough_slot(&mut self, alt: u8) -> Option<&mut DfuState<PassthroughDfuHandler>> {
+        let idx = (alt as usize).saturating_sub(1);
+        self.passthrough.get_mut(idx)?.as_mut()
+    }
+}
+
+/// Provides the DFU product string for the DFU interface's alt settings.
+///
+/// DFU hosts (e.g. dfu-util) show this string in place of the raw index; it is
+/// parked alongside [`UsbDfuIface`] so it lives for the USB device's lifetime.
+#[cfg(feature = "dfu")]
+struct DfuStringProvider {
+    string_idx: StringIndex,
+    string_val: &'static str,
+}
+
+#[cfg(feature = "dfu")]
+impl Handler for DfuStringProvider {
+    fn control_out(&mut self, _req: Request, _data: &[u8]) -> Option<OutResponse> {
+        None
+    }
+    fn control_in<'a>(&'a mut self, _req: Request, _buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        None
+    }
+    fn get_string(&mut self, index: StringIndex, _lang_id: u16) -> Option<&'static str> {
+        (index == self.string_idx).then_some(self.string_val)
+    }
+}
+
+/// Register a DFU interface on the USB builder.
+///
+/// Alt 0 is the device's own DFU download partition; `num_peripherals` more
+/// alts (up to [`MAX_PASSTHROUGH_ALTS`]) become passthrough slots for split
+/// peripherals (requires `dfu_split`). The parked proxy ([`UsbDfuIface`]) does
+/// all routing and never touches flash — downloads flow through the command
+/// channel to the [`RmkDfuInterface`](crate::dfu::RmkDfuInterface) updater task.
+#[cfg(feature = "dfu")]
+fn register_dfu_iface<D: Driver<'static>>(
+    builder: &mut Builder<'static, D>,
+    product_name: &'static str,
+    #[cfg(feature = "dfu_split")] num_peripherals: usize,
+) {
+    let central_attrs = DfuAttributes::CAN_DOWNLOAD | DfuAttributes::WILL_DETACH;
+    let string_idx = builder.string();
+
+    let mut func = builder.function(0x00, 0x00, 0x00);
+    let mut iface = func.interface();
+    let mut alt = iface.alt_setting(0xFE, 0x01, 0x02, Some(string_idx));
+    alt.descriptor(
+        0x21,
+        &[
+            central_attrs.bits(),
+            0xc4,
+            0x09,
+            (BLOCK_SIZE_DFU & 0xff) as u8,
+            ((BLOCK_SIZE_DFU >> 8) & 0xff) as u8,
+            0x10,
+            0x01,
+        ],
+    );
+
+    #[cfg(feature = "dfu_split")]
+    let num_passthrough = num_peripherals.min(MAX_PASSTHROUGH_ALTS);
+    #[cfg(feature = "dfu_split")]
+    for _ in 0..num_passthrough {
+        let mut alt = iface.alt_setting(0xFE, 0x01, 0x02, Some(string_idx));
+        alt.descriptor(
+            0x21,
+            &[
+                DfuAttributes::CAN_DOWNLOAD.bits(),
+                0xc4,
+                0x09,
+                (BLOCK_SIZE_DFU & 0xff) as u8,
+                ((BLOCK_SIZE_DFU >> 8) & 0xff) as u8,
+                0x10,
+                0x01,
+            ],
+        );
+    }
+    drop(func);
+
+    static DFU_IFACE: StaticCell<UsbDfuIface> = StaticCell::new();
+    let dfu_iface = DFU_IFACE.init(UsbDfuIface {
+        central: DfuState::new(UsbProxyDfuHandler, central_attrs),
+        #[cfg(feature = "dfu_split")]
+        passthrough: {
+            let mut slots: [Option<DfuState<PassthroughDfuHandler>>; MAX_PASSTHROUGH_ALTS] = Default::default();
+            for id in 0..num_passthrough {
+                slots[id] = Some(DfuState::new(
+                    PassthroughDfuHandler {
+                        target_id: id,
+                        written: 0,
+                    },
+                    DfuAttributes::CAN_DOWNLOAD,
+                ));
+            }
+            slots
+        },
+        current_alt: 0,
+    });
+    builder.handler(dfu_iface);
+
+    static STRING_PROVIDER: StaticCell<DfuStringProvider> = StaticCell::new();
+    let string_provider = STRING_PROVIDER.init(DfuStringProvider {
+        string_idx,
+        string_val: product_name,
+    });
+    builder.handler(string_provider);
+}
+
 /// USB transport. Owns the embassy-usb device + every HID reader/writer
 /// pair and runs them concurrently for the lifetime of the program.
 ///
@@ -265,8 +506,19 @@ pub struct UsbTransport<'a, D: Driver<'static>, S = ()> {
 }
 
 impl<'a, D: Driver<'static>> UsbTransport<'a, D> {
-    pub fn new(driver: D, device_config: DeviceConfig<'static>) -> Self {
-        UsbTransportBuilder::new(driver, device_config, default_config_descriptor()).build()
+    pub fn new(
+        driver: D,
+        device_config: DeviceConfig<'static>,
+        #[cfg(feature = "dfu_split")] num_peripherals: usize,
+    ) -> Self {
+        UsbTransportBuilder::new(
+            driver,
+            device_config,
+            default_config_descriptor(),
+            #[cfg(feature = "dfu_split")]
+            num_peripherals,
+        )
+        .build()
     }
 
     /// Start a USB stack the caller finishes, for binaries serving USB classes of
@@ -281,7 +533,13 @@ impl<'a, D: Driver<'static>> UsbTransport<'a, D> {
         // A CDC ACM function costs ~66 descriptor bytes, an extra HID interface ~40.
         const SIZE: usize = DEFAULT_CONFIG_DESC_SIZE + 256;
         static CONFIG_DESC: StaticCell<[u8; SIZE]> = StaticCell::new();
-        UsbTransportBuilder::new(driver, device_config, &mut CONFIG_DESC.init([0; SIZE])[..])
+        UsbTransportBuilder::new(
+            driver,
+            device_config,
+            &mut CONFIG_DESC.init([0; SIZE])[..],
+            #[cfg(feature = "dfu_split")]
+            crate::SPLIT_PERIPHERALS_NUM,
+        )
     }
 }
 
@@ -303,7 +561,12 @@ pub struct UsbTransportBuilder<D: Driver<'static>> {
 impl<D: Driver<'static>> UsbTransportBuilder<D> {
     // Without `always`, opt-level="z" moves the whole struct between the two: +300 bytes.
     #[inline(always)]
-    fn new(driver: D, device_config: DeviceConfig<'static>, config_descriptor: &'static mut [u8]) -> Self {
+    fn new(
+        driver: D,
+        device_config: DeviceConfig<'static>,
+        config_descriptor: &'static mut [u8],
+        #[cfg(feature = "dfu_split")] num_peripherals: usize,
+    ) -> Self {
         // nRF chips don't have a stable USB serial number unless one is derived
         // from the FICR. Override here so user code doesn't have to know.
         #[cfg(feature = "_nrf_ble")]
@@ -331,16 +594,13 @@ impl<D: Driver<'static>> UsbTransportBuilder<D> {
         #[cfg(feature = "usb_log")]
         let logger = add_usb_logger!(&mut builder);
 
-        #[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-        if let Some(mgr) = crate::dfu::get_manager() {
-            crate::dfu::register_dfu_interface(
-                &mut builder,
-                mgr,
-                device_config.product_name,
-                #[cfg(feature = "dfu_split")]
-                crate::SPLIT_PERIPHERALS_NUM,
-            );
-        }
+        #[cfg(feature = "dfu")]
+        register_dfu_iface(
+            &mut builder,
+            device_config.product_name,
+            #[cfg(feature = "dfu_split")]
+            num_peripherals,
+        );
 
         #[cfg(any(feature = "host", feature = "dongle"))]
         let (host_reader, host_writer) = host_usb::build_host_usb(&mut builder);
@@ -503,7 +763,7 @@ async fn run_usb_logger<D: Driver<'static>>(logger_class: CdcAcmClass<'static, D
     logger_fut.await;
 }
 
-#[cfg(any(feature = "usb_log", feature = "dfu_nrf", feature = "dfu_rp"))]
+#[cfg(any(feature = "usb_log", feature = "dfu"))]
 pub async fn run_peripheral_usb<D: Driver<'static>>(driver: D, config: DeviceConfig<'static>) {
     let mut builder = new_usb_builder(driver, config, default_config_descriptor());
 
@@ -512,16 +772,13 @@ pub async fn run_peripheral_usb<D: Driver<'static>>(driver: D, config: DeviceCon
     #[cfg(not(feature = "usb_log"))]
     let logger_fut = ::core::future::pending::<()>();
 
-    #[cfg(any(feature = "dfu_rp", feature = "dfu_nrf"))]
-    if let Some(mgr) = crate::dfu::get_manager() {
-        crate::dfu::register_dfu_interface(
-            &mut builder,
-            mgr,
-            config.product_name,
-            #[cfg(feature = "dfu_split")]
-            0,
-        );
-    }
+    #[cfg(feature = "dfu")]
+    register_dfu_iface(
+        &mut builder,
+        config.product_name,
+        #[cfg(feature = "dfu_split")]
+        0,
+    );
 
     let mut usb_device = builder.build();
 

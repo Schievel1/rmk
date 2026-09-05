@@ -7,6 +7,9 @@ use embassy_sync::signal::Signal;
 use embassy_usb::class::dfu::consts::Status;
 use embassy_usb::class::dfu::dfu_mode::{self};
 use heapless;
+use rmk_types::dfu::DfuStatus;
+
+use crate::event::{DfuStatusEvent, publish_event};
 
 // ---------------------------------------------------------------------------
 // Firmware update data registry
@@ -148,11 +151,15 @@ pub(crate) struct PassthroughDfuHandler {
 
 impl dfu_mode::Handler for PassthroughDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
+        crate::dfu::dfu_lock_check()?;
+        info!("dfu: DFU download started (passthrough peripheral {})", self.target_id);
+        publish_event(DfuStatusEvent::new(DfuStatus::Started));
         self.written = 0;
         Ok(())
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Status> {
+        publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         for chunk in data.chunks(256) {
             let mut buf = [0u8; 256];
             buf[..chunk.len()].copy_from_slice(chunk);
@@ -175,8 +182,10 @@ impl dfu_mode::Handler for PassthroughDfuHandler {
     fn finish(&mut self) -> Result<(), Status> {
         if passthrough_push(PassthroughCommand::Finish).is_err() {
             error!("dfu_split: passthrough queue full at finish");
+            publish_event(DfuStatusEvent::new(DfuStatus::Error));
             return Err(Status::ErrUnknown);
         }
+        publish_event(DfuStatusEvent::new(DfuStatus::Finished));
         PASSTHROUGH_TARGET.store(self.target_id, Ordering::Release);
         Ok(())
     }
