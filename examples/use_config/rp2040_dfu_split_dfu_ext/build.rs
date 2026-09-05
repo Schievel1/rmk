@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -10,43 +10,36 @@ fn main() {
     println!("cargo:rerun-if-changed=vial.json");
     generate_vial_config();
 
-    // The central (dfu_ext) and the peripheral (internal DFU) use different
-    // flash layouts, so pick the matching memory.x per binary. Cargo does not
-    // expose the bin name to build scripts, so the Makefile sets RMK_DFU_BIN;
-    // the central layout is the default for plain `cargo build`.
-    let bin_name = match env::var("RMK_DFU_BIN") {
-        Ok(bin) => bin,
-        Err(_) => {
-            println!(
-                "cargo:warning=RMK_DFU_BIN not set - linking ALL bins with central's memory.x. The peripheral binary must be built with its own layout (e.g. `cargo make bin-peripheral`)."
-            );
-            "central".to_string()
-        }
-    };
-    let memory_x = if bin_name == "peripheral" {
-        "memory-peripheral.x"
-    } else {
-        "memory-central.x"
-    };
-    // Re-run the build script when a different binary is built — otherwise
-    // Cargo caches the output and the wrong memory.x is linked.
-    println!("cargo:rerun-if-env-changed=RMK_DFU_BIN");
-
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let memory_content = fs::read(manifest_dir.join(memory_x)).unwrap();
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(&memory_content)
-        .unwrap();
+
+    // Copy both memory layouts into OUT_DIR so the per-binary -T flags find them.
+    fs::copy(manifest_dir.join("memory-central.x"), out.join("memory-central.x")).unwrap();
+    fs::copy(
+        manifest_dir.join("memory-peripheral.x"),
+        out.join("memory-peripheral.x"),
+    )
+    .unwrap();
+
+    // An empty memory.x so link.x's `INCLUDE memory.x` is a no-op;
+    // the real MEMORY section comes from -Tmemory-<bin>.x below.
+    fs::write(out.join("memory.x"), "/* empty — provided per binary via -T flag */\n").unwrap();
+
     println!("cargo:rustc-link-search={}", out.display());
+
+    // Per-binary linker scripts: memory layout + standard link.x + defmt.x
+    println!("cargo:rustc-link-arg-bin=central=-Tmemory-central.x");
+    println!("cargo:rustc-link-arg-bin=central=-Tlink.x");
+    println!("cargo:rustc-link-arg-bin=central=-Tdefmt.x");
+    println!("cargo:rustc-link-arg-bin=central=--nmagic");
+
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tmemory-peripheral.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tlink.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tdefmt.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=--nmagic");
 
     println!("cargo:rerun-if-changed=memory-central.x");
     println!("cargo:rerun-if-changed=memory-peripheral.x");
-
-    println!("cargo:rustc-link-arg=--nmagic");
-    println!("cargo:rustc-link-arg=-Tlink.x");
-    println!("cargo:rustc-link-arg=-Tdefmt.x");
 }
 
 fn generate_vial_config() {

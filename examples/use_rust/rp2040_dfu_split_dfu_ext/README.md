@@ -13,8 +13,8 @@ single firmware:
 Because the two halves use different flash layouts, they are built from the
 same crate but with **two different memory.x files** (`memory-central.x` and
 `memory-peripheral.x`), one linker script per binary. The build script picks
-the right one based on the `RMK_DFU_BIN` environment variable (see
-`build.rs`).
+the right one automatically based on `CARGO_BIN_NAME` (e.g. `--bin central`
+or `--bin peripheral`).
 
 ## Wiring
 
@@ -55,8 +55,8 @@ This produces four artifacts in the example directory:
 To build a single half directly:
 
 ```shell
-RMK_DFU_BIN=peripheral cargo build --bin peripheral --release
-RMK_DFU_BIN=central   cargo build --bin central   --release
+cargo build --bin peripheral --release
+cargo build --bin central   --release
 ```
 
 ## Flashing
@@ -66,5 +66,4 @@ RMK_DFU_BIN=central   cargo build --bin central   --release
    it.
 
 If you use a debugging probe instead, flash `cargo run --release --bin
-central|peripheral` per half with the same `RMK_DFU_BIN` variable as in the
-build step.
+central|peripheral` per half.

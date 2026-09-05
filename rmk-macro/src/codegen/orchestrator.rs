@@ -425,7 +425,7 @@ fn expand_main(
     // ran, so gate on that instead of a `#[cfg]` — a cfg inside the emitted
     // code would evaluate against the user crate's features.
     let mark = if defines_dfu_partitions() {
-        quote! { ::rmk::dfu::mark_booted(&mut state_partition); }
+        quote! { ::rmk::dfu::mark_booted(&mut state_partition).await; }
     } else {
         quote! {}
     };

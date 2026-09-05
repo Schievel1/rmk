@@ -40,13 +40,15 @@ async fn main(_spawner: Spawner) {
     // Flash partition layout comes from the DFU symbols in memory.x. The
     // DFU partition is passed to the split firmware-update handler — the
     // central forwards new firmware over the split link.
-    let flash_mutex = FlashMutex::new(core::cell::RefCell::new(
-        Flash::<_, _, { rmk::dfu::FLASH_SIZE }>::new_blocking(p.FLASH),
-    ));
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
     let (_, mut state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     // mark the firmware as booted otherwise the bootloader thinks it didn't and will revert to the old firmware
-    rmk::dfu::mark_booted(&mut state_partition);
+    rmk::dfu::mark_booted(&mut state_partition).await;
 
     // DFU LED processor, optional. Flashes the LED when DFU is active
     let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);

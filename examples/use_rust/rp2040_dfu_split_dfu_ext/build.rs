@@ -1,17 +1,5 @@
-//! This build script copies the `memory.x` file from the crate root into
-//! a directory where the linker can always find it at build time.
-//! For many projects this is optional, as the linker always searches the
-//! project root directory -- wherever `Cargo.toml` is. However, if you
-//! are using a workspace or have a more complicated build setup, this
-//! build script becomes required. Additionally, by requesting that
-//! Cargo re-run the build script whenever `memory.x` is changed,
-//! updating `memory.x` ensures a rebuild of the application with the
-//! new memory settings.
-//!
-//! The build script also sets the linker flags to tell it which link script to use.
-
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -19,62 +7,39 @@ use const_gen::*;
 use xz2::read::XzEncoder;
 
 fn main() {
-    // Generate vial config at the root of project
     println!("cargo:rerun-if-changed=vial.json");
     generate_vial_config();
 
-    // The central (dfu_ext) and the peripheral (internal DFU) use different
-    // flash layouts, so pick the matching memory.x per binary. Cargo does not
-    // expose the bin name to build scripts, so the Makefile sets RMK_DFU_BIN;
-    // the central layout is the default for plain `cargo build`.
-    let bin_name = match env::var("RMK_DFU_BIN") {
-        Ok(bin) => bin,
-        Err(_) => {
-            println!(
-                "cargo:warning=RMK_DFU_BIN not set - linking ALL bins with central's memory.x. The peripheral binary must be built with its own layout (e.g. `cargo make bin-peripheral`)."
-            );
-            "central".to_string()
-        }
-    };
-    let memory_x = if bin_name == "central" {
-        "memory-central.x"
-    } else {
-        "memory-peripheral.x"
-    };
-    // Re-run the build script when a different binary is built — otherwise
-    // Cargo caches the output and the wrong memory.x is linked.
-    println!("cargo:rerun-if-env-changed=RMK_DFU_BIN");
-
-    // Put `memory.x` in our output directory and ensure it's
-    // on the linker search path.
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let memory_content = fs::read(manifest_dir.join(memory_x)).unwrap();
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(&memory_content)
-        .unwrap();
+
+    // Copy both memory layouts into OUT_DIR so the per-binary -T flags find them.
+    fs::copy(manifest_dir.join("memory-central.x"), out.join("memory-central.x")).unwrap();
+    fs::copy(
+        manifest_dir.join("memory-peripheral.x"),
+        out.join("memory-peripheral.x"),
+    )
+    .unwrap();
+
+    // An empty memory.x so link.x's `INCLUDE memory.x` is a no-op;
+    // the real MEMORY section comes from -Tmemory-<bin>.x below.
+    fs::write(out.join("memory.x"), "/* empty — provided per binary via -T flag */\n").unwrap();
+
     println!("cargo:rustc-link-search={}", out.display());
 
-    // By default, Cargo will re-run a build script whenever
-    // any file in the project changes. By specifying the memory
-    // files here, we ensure the build script is only re-run when
-    // they change.
+    // Per-binary linker scripts: memory layout + standard link.x + defmt.x
+    println!("cargo:rustc-link-arg-bin=central=-Tmemory-central.x");
+    println!("cargo:rustc-link-arg-bin=central=-Tlink.x");
+    println!("cargo:rustc-link-arg-bin=central=-Tdefmt.x");
+    println!("cargo:rustc-link-arg-bin=central=--nmagic");
+
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tmemory-peripheral.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tlink.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=-Tdefmt.x");
+    println!("cargo:rustc-link-arg-bin=peripheral=--nmagic");
+
     println!("cargo:rerun-if-changed=memory-central.x");
     println!("cargo:rerun-if-changed=memory-peripheral.x");
-
-    // Specify linker arguments.
-
-    // `--nmagic` is required if memory section addresses are not aligned to 0x10000,
-    // for example the FLASH and RAM sections in your `memory.x`.
-    // See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
-    println!("cargo:rustc-link-arg=--nmagic");
-
-    // Set the linker script to the one provided by cortex-m-rt.
-    println!("cargo:rustc-link-arg=-Tlink.x");
-
-    // Set the linker script of the defmt
-    println!("cargo:rustc-link-arg=-Tdefmt.x");
 }
 
 fn generate_vial_config() {

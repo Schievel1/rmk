@@ -7,39 +7,35 @@ install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = ["-
 [tasks.build-peripheral]
 command = "cargo"
 args = ["build", "--bin", "peripheral", "--release"]
-env = { RMK_DFU_BIN = "peripheral" }
 dependencies = ["install-llvm-tools", "flip-link"]
 
 [tasks.bin-peripheral]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = ["objcopy", "--help"] }
 command = "cargo"
 args = ["objcopy", "--release", "--bin", "peripheral", "--", "-O", "binary", "rmk-rp2040-dfu-split-dfu-ext-peripheral.bin"]
-env = { RMK_DFU_BIN = "peripheral" }
 dependencies = ["build-peripheral"]
 
 [tasks.build-central]
 command = "cargo"
 args = ["build", "--bin", "central", "--release"]
-env = { RMK_DFU_BIN = "central" }
 dependencies = ["bin-peripheral", "install-llvm-tools", "flip-link"]
 
 [tasks.bin-central]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = ["objcopy", "--help"] }
 command = "cargo"
 args = ["objcopy", "--release", "--bin", "central", "--", "-O", "binary", "rmk-rp2040-dfu-split-dfu-ext-central.bin"]
-env = { RMK_DFU_BIN = "central" }
 dependencies = ["build-central"]
 
 [tasks.objcopy-peripheral]
 install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = ["objcopy", "--help"] }
 command = "cargo"
 args = ["objcopy", "--release", "--bin", "peripheral", "--", "-O", "ihex", "rmk-rp2040-dfu-split-dfu-ext-peripheral.hex"]
-env = { RMK_DFU_BIN = "peripheral" }
 dependencies = ["build-peripheral"]
 
 [tasks.objcopy-central]
 install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = ["objcopy", "--help"] }
 command = "cargo"
 args = ["objcopy", "--release", "--bin", "central", "--", "-O", "ihex", "rmk-rp2040-dfu-split-dfu-ext-central.hex"]
-env = { RMK_DFU_BIN = "central" }
 dependencies = ["build-central"]
 
 [tasks.uf2-peripheral]
