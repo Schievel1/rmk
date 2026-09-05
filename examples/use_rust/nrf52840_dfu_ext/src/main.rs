@@ -19,7 +19,7 @@ use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{FlashMutex, Partition, RmkDfuInterface, partitions_from_linkerscript};
+use rmk::dfu::{FlashDfuHandler, FlashMutex, Partition, partitions_from_linkerscript};
 use rmk::driver::w25q::W25qNorFlash;
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
@@ -71,7 +71,7 @@ async fn main(_spawner: Spawner) {
     // Internal flash: only the boot state and storage partitions are used, so
     // the internal DFU partition from the linkerscript layout is discarded.
     let flash_mutex = FlashMutex::new(async_flash_wrapper(Nvmc::new(p.NVMC)));
-    let (storage_partition, mut state_partition, _) = partitions_from_linkerscript(&flash_mutex);
+    let (storage_partition, state_partition, _) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::new(
         Output::new(p.P0_15, Level::Low, OutputDrive::Standard),
@@ -112,14 +112,12 @@ async fn main(_spawner: Spawner) {
     )
     .await;
 
-    rmk::dfu::mark_booted(&mut state_partition).await;
-
     let debouncer = DefaultDebouncer::new();
     let mut matrix = Matrix::<_, _, _, ROW, COL, true>::new(row_pins, col_pins, debouncer);
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
-    let mut dfu_iface = RmkDfuInterface::new(dfu_partition, state_partition);
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 

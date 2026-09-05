@@ -7,7 +7,7 @@ use syn::{ItemFn, ItemMod};
 
 use super::override_helper::Overwritten;
 use crate::codegen::chip::flash::expand_dfu_interface;
-use crate::codegen::feature::{defines_dfu_partitions, get_rmk_features, is_feature_enabled};
+use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn expand_rmk_entry(
@@ -131,7 +131,7 @@ pub(crate) fn rmk_entry_select(
         communication,
         CommunicationConfig::Usb(_) | CommunicationConfig::Both(_, _)
     );
-    let (dfu_interface, num_peripherals) = if defines_dfu_partitions() && communication_uses_usb {
+    let (dfu_interface, num_peripherals) = if cfg!(feature = "_dfu") && communication_uses_usb {
         let num_peripherals = match board {
             BoardConfig::Split(split) => split.peripheral.len(),
             BoardConfig::UniBody(_) => 0,
@@ -201,8 +201,8 @@ pub(crate) fn rmk_entry_select(
                             let rmk_features = get_rmk_features();
                             let dfu_split_enabled = is_feature_enabled(&rmk_features, "dfu_split");
                             let policy = if dfu_split_enabled {
-                                match p.update_policy.as_deref() {
-                                    Some("force") => {
+                                match p.update_policy {
+                                    Some(rmk_config::UpdatePolicy::Force) => {
                                         quote! { ::rmk::split::central::UpdatePolicy::Force }
                                     }
                                     _ => quote! { ::rmk::split::central::UpdatePolicy::MatchHash },
