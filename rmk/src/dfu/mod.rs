@@ -1,27 +1,33 @@
 //! # DFU — Device Firmware Update
 //!
-//! This module implements USB DFU firmware updates for RMK keyboards.
+//! This module implements DFU firmware updates for RMK keyboards. DFU is
+//! available over USB (via `ProxyUsbDfuHandler`) and over BLE via the rynk
+//! protocol (via `ProxyRynkDfuHandler`). Both paths feed into the same
+//! `DFU_CHANNEL` and `FlashDfuHandler`.
 //!
 //! ## Data flow
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────────────┐
-//! │  Host (dfu-util / WebUSB)                                        │
-//! │    USB Control Transfer (GET_DESCRIPTOR / DFU_DNLOAD)            │
-//! └──────────────┬──────────────────────────────────┬────────────-───┘
-//!                │                                  │
-//!                ▼                                  ▼
-//! ┌─-─────────────────────────┐        ┌──────────────────────────────┐
-//! │  UsbDfuIface              │        │  ProxyUsbDfuHandler          │
-//! │  (USB control handler)    │        │  (ISR → DFU_CHANNEL)         │
-//! │                           │        │                              │
-//! │  alt 0 → Central          │        │  target = DfuTarget::Central │
-//! │  alt 1 → Peripheral(0)    │        │  writes: DfuCmd::Write(tgt,  │
-//! │  alt 2 → Peripheral(1)    │        │          offset, data[512])  │
-//! │  ...                      │        └──────────┬───────────────────┘
-//! └──-────────────────────────┘                   │
-//!                                                 │
-//!                           DFU_CHANNEL (cap 4)   ▼
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │  Host (dfu-util / WebUSB / rynk-wtf)                                 │
+//! │    USB Control Transfer  OR  BLE rynk DFU commands                   │
+//! └──────────┬──────────────────────────────────────┬────────────────────┘
+//!            │ USB                                  │ BLE (rynk)
+//!            ▼                                      ▼
+//! ┌───────────────────────┐        ┌────────────────────────────────────┐
+//! │  UsbDfuIface          │        │  ProxyRynkDfuHandler               │
+//! │  (USB control)        │        │  (DFU commands → DFU_CHANNEL)      │
+//! │                       │        │  CRC checkpoint/rewind state       │
+//! │  alt 0 → Central      │        └──────────┬─────────────────────────┘
+//! │  alt 1 → Peripheral(0)│                   │
+//! │  alt 2 → Peripheral(1)│                   │
+//! │  ...                  │                   │
+//! └──────────┬────────────┘                   │
+//!            │                                │
+//!            └──────────┬─────────────────────┘
+//!                       │
+//!                       ▼
+//!              DFU_CHANNEL (cap 4)
 //! ┌───────────────────────────────────────────────────────────────┐
 //! │                                                               │
 //! │  ┌─── PeripheralManager (central event loop) ──────────────┐  │
