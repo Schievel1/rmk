@@ -308,16 +308,22 @@ impl<'a> Keyboard<'a> {
         })
     }
 
-    /// `next_deadline()` and `fire_expired()` are a pair, kept adjacent and in
-    /// the same order: every source listed here must be cleared or advanced by
-    /// its `fire_*` once due, or `run()` spins on a deadline that never expires.
+    /// Every source here is cleared or advanced by its `fire_*` in
+    /// `fire_expired()` once due, or `run()` spins on it.
     fn next_deadline(&self) -> Option<Instant> {
+        let buffered = self.next_buffered_key().map(|k| k.timeout_time);
+        // A buffered key still owns the one-shot it was pressed under, so the
+        // one-shot only expires while nothing is buffered.
+        let one_shot = if buffered.is_some() {
+            None
+        } else {
+            [self.osm_deadline, self.osl_deadline].into_iter().flatten().min()
+        };
         [
-            self.osm_deadline,
-            self.osl_deadline,
+            one_shot,
             #[cfg(feature = "_ble")]
             self.user_hold.map(|(at, _)| at),
-            self.next_buffered_key().map(|k| k.timeout_time),
+            buffered,
             self.mouse.next_deadline(),
         ]
         .into_iter()
@@ -328,10 +334,14 @@ impl<'a> Keyboard<'a> {
     /// Fire every due deadline. Each `fire_*` re-checks its own deadline, so a
     /// call before expiry is a no-op.
     async fn fire_expired(&mut self) {
-        self.fire_oneshot_timeout().await;
+        // The buffered key fires in place of the one-shot it holds up (see `next_deadline`).
+        if self.next_buffered_key().is_some() {
+            self.fire_buffered_key_timeout().await;
+        } else {
+            self.fire_oneshot_timeout().await;
+        }
         #[cfg(feature = "_ble")]
         self.fire_user_hold().await;
-        self.fire_buffered_key_timeout().await;
         self.fire_mouse_repeat().await;
     }
 
