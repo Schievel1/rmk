@@ -1211,17 +1211,23 @@ impl<'a> Keyboard<'a> {
     async fn dispatch_combos(&mut self, key_action: &KeyAction, event: KeyboardEvent) {
         self.trigger_delayed_combo(key_action, event).await;
 
-        // Dispatch all keys with state `WaitingCombo` in the held buffer
-        let mut i = 0;
-        while i < self.held_buffer.keys.len() {
-            if self.held_buffer.keys[i].state == KeyState::WaitingCombo {
-                let key = self.held_buffer.keys.swap_remove(i);
-                debug!("[Combo] Dispatching combo: {:?}", key);
-                self.process_key_action(&key.action, key.event, false, key.press_time)
-                    .await;
-            } else {
-                i += 1;
-            }
+        // Dispatch every key waiting on a combo, earliest press first. Re-scan the
+        // buffer after each one instead of indexing it: dispatching a key can remove
+        // and re-push other entries (a held morse key resolving as a hold does), and
+        // an index taken before that shift skips the entry that moved into it.
+        while let Some(i) = self
+            .held_buffer
+            .keys
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.state == KeyState::WaitingCombo)
+            .min_by_key(|(_, k)| k.press_time)
+            .map(|(i, _)| i)
+        {
+            let key = self.held_buffer.keys.remove(i);
+            debug!("[Combo] Dispatching combo: {:?}", key);
+            self.process_key_action(&key.action, key.event, false, key.press_time)
+                .await;
         }
 
         // Reset triggered combo states
