@@ -55,11 +55,6 @@ impl HeldBuffer {
         }
     }
 
-    /// Remove the held key at `pos`
-    pub fn remove(&mut self, pos: KeyboardEventPos) -> Option<HeldKey> {
-        self.remove_if(|k| k.event.pos == pos)
-    }
-
     /// Get the key with the earliest timeout among those matching `predicate`.
     pub fn next_timeout<P>(&self, mut predicate: P) -> Option<HeldKey>
     where
