@@ -311,6 +311,20 @@ rmk = { features = [ "dfu_rp", "split", "dfu_split"] }
 
 `dfu_split` requires `dfu` (implied by `dfu_rp` / `dfu_nrf`) and `split`.
 
+### Peripherals count
+
+Each connected peripheral needs one subscriber slot on `DfuCmdEvent`.
+The number ob subscribers is automatically calculated using the `SPLIT_PERIPHERALS_NUM` constant.
+The constant is automatically set to 1, when the `split` feature is enabled.
+However, if you have more than one peripheral, increase the constant accordingly:
+```toml title="keyboard.toml"
+[rmk]
+split_peripherals_num = 2 # central + 2 peripherals
+```
+
+See [RMK Internal Configuration](../../configuration/rmk_config.md) for details on
+tuning RMK's general constants.
+
 ### Architecture
 
 Two complementary paths are provided:

@@ -37,9 +37,9 @@ use crate::dfu::DFU_WRITE_FAILED;
 #[cfg(feature = "_dfu")]
 use crate::dfu::MAX_DFU_ALTS;
 #[cfg(feature = "_dfu")]
-use crate::dfu::{BLOCK_SIZE_DFU, DFU_CHANNEL, DfuCmd};
+use crate::dfu::{BLOCK_SIZE_DFU, DFU_PENDING, DfuCmd};
 #[cfg(feature = "_dfu")]
-use crate::event::{DfuStatusEvent, publish_event};
+use crate::event::{DfuCmdEvent, DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
 use crate::hid::StenoReport;
 use crate::hid::{
@@ -271,7 +271,7 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
 /// Runs inside the USB interrupt. It never touches flash: every download
 /// `start`/`write`/`finish`/`system_reset` is forwarded to the async
 /// [`FlashDfuHandler`](crate::dfu::FlashDfuHandler) updater task through
-/// the command channel ([`DFU_CHANNEL`](crate::dfu::DFU_CHANNEL)). The DFU
+/// the event system ([`DfuCmdEvent`](crate::event::DfuCmdEvent)). The DFU
 /// lock gate (if enabled) is checked here so every DFU start path shares
 /// one place.
 #[cfg(feature = "_dfu")]
@@ -282,28 +282,16 @@ struct ProxyUsbDfuHandler {
 }
 
 #[cfg(feature = "_dfu")]
-impl ProxyUsbDfuHandler {
-    fn signal_peripheral(&self) {
-        #[cfg(feature = "dfu_split")]
-        if let crate::dfu::DfuTarget::Peripheral(id) = self.target {
-            crate::dfu::DFU_PERIPH_SIGNALS[id as usize].signal(());
-        }
-    }
-}
-
-#[cfg(feature = "_dfu")]
 impl dfu_mode::Handler for ProxyUsbDfuHandler {
     fn start(&mut self) -> Result<(), Status> {
         crate::dfu::dfu_lock_check()?;
         self.written = 0;
         info!("dfu: DFU download started ({:?})", self.target);
-        DFU_CHANNEL
-            .try_send(DfuCmd::Start(self.target))
-            .map_err(|_| Status::ErrUnknown)?;
+        DFU_PENDING.store(true, Ordering::Release);
+        publish_event(DfuCmdEvent(DfuCmd::Start(self.target)));
         #[cfg(feature = "dfu_lock")]
         DFU_STARTED.store(true, Ordering::Release);
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
-        self.signal_peripheral();
         Ok(())
     }
 
@@ -316,11 +304,9 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
         self.written += data.len() as u32;
-        DFU_CHANNEL
-            .try_send(DfuCmd::Write(self.target, offset, buf))
-            .map_err(|_| Status::ErrUnknown)?;
+        DFU_PENDING.store(true, Ordering::Release);
+        publish_event(DfuCmdEvent(DfuCmd::Write(self.target, offset, buf)));
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
-        self.signal_peripheral();
         Ok(())
     }
 
@@ -329,24 +315,16 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
             DFU_WRITE_FAILED.store(false, Ordering::Release);
             return Err(Status::ErrWrite);
         }
-        if DFU_CHANNEL.try_send(DfuCmd::Finish(self.target)).is_err() {
-            error!("dfu: DFU command queue full at finish");
-            publish_event(DfuStatusEvent::new(DfuStatus::Error));
-            return Err(Status::ErrUnknown);
-        }
-        self.signal_peripheral();
+        DFU_PENDING.store(true, Ordering::Release);
+        publish_event(DfuCmdEvent(DfuCmd::Finish(self.target)));
         publish_event(DfuStatusEvent::new(DfuStatus::Finished));
         info!("dfu: DFU download complete");
         Ok(())
     }
 
     fn system_reset(&mut self) {
-        if DFU_CHANNEL.try_send(DfuCmd::SystemReset(self.target)).is_err() {
-            error!("dfu: DFU command queue full at system_reset");
-            publish_event(DfuStatusEvent::new(DfuStatus::Error));
-            return;
-        }
-        self.signal_peripheral();
+        DFU_PENDING.store(true, Ordering::Release);
+        publish_event(DfuCmdEvent(DfuCmd::SystemReset(self.target)));
     }
 }
 
@@ -356,8 +334,8 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
 /// with `DfuTarget::Central` to the async updater); alt 1..N are split
 /// peripheral slots (requires `dfu_split`), forwarded with
 /// `DfuTarget::Peripheral(n)`. Routes by the current alternate setting and
-/// injects adaptive host-side flow control (`dfuDNBUSY`) while the command
-/// queue is non-empty.
+/// injects adaptive host-side flow control (`dfuDNBUSY`) while commands are
+/// still in flight.
 #[cfg(feature = "_dfu")]
 struct UsbDfuIface {
     handlers: [Option<DfuState<ProxyUsbDfuHandler>>; MAX_DFU_ALTS],
@@ -403,7 +381,7 @@ impl Handler for UsbDfuIface {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         const DFU_GETSTATUS: u8 = 3;
 
-        if !DFU_CHANNEL.is_empty() && req.request == DFU_GETSTATUS {
+        if DFU_PENDING.load(Ordering::Acquire) && req.request == DFU_GETSTATUS {
             // Short-circuit: return dfuDNBUSY directly without
             // advancing the DfuState machine. The state stays in
             // DlSync so the next real GETSTATUS (after the queue

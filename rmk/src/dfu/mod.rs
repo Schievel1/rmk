@@ -13,25 +13,25 @@
 //!                ▼                                  ▼
 //! ┌─-─────────────────────────┐        ┌──────────────────────────────┐
 //! │  UsbDfuIface              │        │  ProxyUsbDfuHandler          │
-//! │  (USB control handler)    │        │  (ISR → DFU_CHANNEL)         │
+//! │  (USB control handler)    │        │  (ISR → publish_event)       │
 //! │                           │        │                              │
 //! │  alt 0 → Central          │        │  target = DfuTarget::Central │
-//! │  alt 1 → Peripheral(0)    │        │  writes: DfuCmd::Write(tgt,  │
-//! │  alt 2 → Peripheral(1)    │        │          offset, data[512])  │
-//! │  ...                      │        └──────────┬───────────────────┘
+//! │  alt 1 → Peripheral(0)    │        │  publish_event(DfuCmdEvent)  │
+//! │  alt 2 → Peripheral(1)    │        └──────────┬───────────────────┘
+//! │  ...                      │                   │
 //! └──-────────────────────────┘                   │
 //!                                                 │
-//!                           DFU_CHANNEL (cap 4)   ▼
+//!                          DfuCmdEvent (PubSub)   ▼
 //! ┌───────────────────────────────────────────────────────────────┐
 //! │                                                               │
 //! │  ┌─── PeripheralManager (central event loop) ──────────────┐  │
-//! │  │  peek DFU_CHANNEL for DfuTarget::Peripheral(n)          │  │
+//! │  │  DfuCmdEvent::subscriber() → filter Peripheral(id)      │  │
 //! │  │  forward as SplitMessage::FirmwareChunk → split link    │──────────┐
 //! │  │  → peripheral FlashDfuHandler                           │  │       │
 //! │  └─────────────────────────────────────────────────────────┘  │       │
 //! │                                                               │       │
 //! │  ┌─── FlashDfuHandler (central) ─────────────────────────-─┐  │       │
-//! │  │  peek DFU_CHANNEL for DfuTarget::Central                │  │       │
+//! │  │  DfuCmdEvent::subscriber() → filter Central             │  │       │
 //! │  │  start → write_chunk(offset, data[512]) → finish        │  │       │
 //! │  │  erase on demand, NorFlash::write to DFU partition      │  │       │
 //! │  │  finish → sanity check (MSP+reset vector)               │  │       │
@@ -42,9 +42,9 @@
 //!                                                ┌─────split link (UART)──┘
 //!                                                ▼                         
 //! ┌─── Peripheral (direct calls, no channel) ─────────────────────┐       
-//! │  FlashDfuHandler::write_chunk(offset, data)                   │
-//! │  FlashDfuHandler::compute_dfu_crc() → FirmwareCrcReport       │
-//! │  mark_updated_and_reset() only on FirmwareCrcOk               │
+//! │  FlashDfuHandler::write_chunk(offset, data)                   │       
+//! │  FlashDfuHandler::compute_dfu_crc() → FirmwareCrcReport       │       
+//! │  mark_updated_and_reset() only on FirmwareCrcOk               │       
 //! └───────────────────────────────────────────────────────────────┘
 //!
 
@@ -53,15 +53,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_boot::FirmwareState;
 pub use embassy_embedded_hal::flash::partition::Partition;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-#[cfg(any(feature = "dfu_split", feature = "dfu_lock"))]
+#[cfg(feature = "dfu_lock")]
 use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::NorFlash;
 use heapless;
 use rmk_types::dfu::DfuStatus;
 
 use crate::core_traits::Runnable;
-use crate::event::{DfuStatusEvent, publish_event};
+use crate::event::{DfuCmdEvent, DfuStatusEvent, SubscribableEvent, publish_event};
 
 /// Total flash size passed to the embassy-rp Flash const generic.
 ///
@@ -176,12 +175,9 @@ mod split;
 #[cfg(feature = "dfu_split")]
 pub use self::split::{get_firmware_update_data, read_embedded_firmware_hash, set_firmware_update_data};
 
-/// Command queue capacity — USB control block plus slack for split forwarding.
-const DFU_CMD_QUEUE_SIZE: usize = 4;
-
 /// Identifies the target of a DFU command — local central firmware or a
 /// specific split peripheral.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum DfuTarget {
     Central,
@@ -189,7 +185,8 @@ pub(crate) enum DfuTarget {
 }
 
 /// A command forwarded from the USB DFU proxy to the async updater task.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum DfuCmd {
     Start(DfuTarget),
     /// `Write(target, offset, data)` — offset is the flash byte offset.
@@ -200,39 +197,27 @@ pub(crate) enum DfuCmd {
 
 impl DfuCmd {
     /// The target (central or peripheral) of this command.
-    fn target(&self) -> DfuTarget {
+    pub(crate) fn target(&self) -> DfuTarget {
         match self {
             DfuCmd::Start(t) | DfuCmd::Write(t, _, _) | DfuCmd::Finish(t) | DfuCmd::SystemReset(t) => *t,
         }
     }
 
     /// Returns `true` when this command is for the central flash updater.
-    fn is_central(&self) -> bool {
+    pub(crate) fn is_central(&self) -> bool {
         matches!(self.target(), DfuTarget::Central)
     }
 
     /// Returns `true` when this command targets a known peripheral (valid id range).
-    fn is_valid_peripheral(&self) -> bool {
+    pub(crate) fn is_valid_peripheral(&self) -> bool {
         matches!(self.target(), DfuTarget::Peripheral(id) if (id as usize) < MAX_DFU_ALTS)
     }
 }
-
-/// Command channel: the USB DFU proxy (ISR context) sends via
-/// [`DFU_CHANNEL`]; the [`FlashDfuHandler`] updater task receives.
-pub(crate) static DFU_CHANNEL: Channel<CriticalSectionRawMutex, DfuCmd, DFU_CMD_QUEUE_SIZE> = Channel::new();
 
 /// Set to `true` by the [`FlashDfuHandler`] when a flash write fails.
 /// The USB proxy reads this flag to reject subsequent `DFU_DNLOAD` / `DFU_UPLOAD`
 /// requests with `ERR_WRITE` instead of forwarding corrupted data.
 pub(crate) static DFU_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
-
-/// Per-peripheral wake signals. The USB ISR ([`ProxyUsbDfuHandler`]) calls
-/// `signal(())` after forwarding a command to [`DFU_CHANNEL`]; the matching
-/// [`PeripheralManager`](crate::split::driver::PeripheralManager) awaits
-/// on `wait()` in its select loop.
-#[cfg(feature = "dfu_split")]
-pub(crate) static DFU_PERIPH_SIGNALS: [Signal<CriticalSectionRawMutex, ()>; MAX_DFU_ALTS] =
-    [const { Signal::new() }; MAX_DFU_ALTS];
 
 /// Gate shared by the transport's DFU start handlers (central alt 0 and the
 /// passthrough slots). Returns `Ok` when a download may proceed; while the
@@ -253,13 +238,19 @@ pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::St
 }
 
 /// Max DFU alternate settings on a single DFU interface.
-pub(crate) const MAX_DFU_ALTS: usize = 4;
+/// Alt 0 is always the central; the remaining slots are split peripherals.
+pub(crate) const MAX_DFU_ALTS: usize = crate::SPLIT_PERIPHERALS_NUM + 1;
+
+/// Set to `true` by the USB proxy when a DFU command is published, and to
+/// `false` by the consumer after processing.  Used by `control_in` to
+/// return `dfuDNBUSY` while commands are still in flight.
+pub(crate) static DFU_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Flash-side DFU updater.
 ///
 /// Owns the DFU download and boot state partitions and runs as a [`Runnable`]
-/// task on the central. It waits on the command channel ([`DFU_CHANNEL`]) and
-/// executes `start`/`write`/`finish`/`system_reset`, fully decoupled from the
+/// task on the central. It subscribes to [`DfuCmdEvent`] and executes
+/// `start`/`write`/`finish`/`system_reset`, fully decoupled from the
 /// USB device.
 ///
 /// On the split peripheral, the same struct is used without the [`Runnable`]
@@ -267,7 +258,7 @@ pub(crate) const MAX_DFU_ALTS: usize = 4;
 /// and [`compute_dfu_crc`](FlashDfuHandler::compute_dfu_crc) directly.
 ///
 /// The USB side (the proxy in `usb.rs`) never touches flash; all commands flow
-/// through the channel. The partitions are typically built with
+/// through the event system. The partitions are typically built with
 /// [`partitions_from_linkerscript`]:
 ///
 /// ```ignore
@@ -406,43 +397,22 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
 impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandler<DFU, STATE> {
     async fn run(&mut self) -> ! {
         self.mark_booted().await;
+        let mut sub = DfuCmdEvent::subscriber();
         loop {
-            // Wait until at least one command is available in the shared
-            // channel. ready_to_receive() blocks without consuming — the
-            // inner loop then peeks and only takes central commands, leaving
-            // peripheral commands for the PeripheralManager.
-            DFU_CHANNEL.ready_to_receive().await;
-
-            // Drain the shared command channel. DFU_CHANNEL is a single MPSC
-            // shared by central and all peripherals. Each consumer peeks the
-            // head without removing it, checks whether the command is for
-            // them, and either receives (removes) it or leaves it for the
-            // next consumer. This inner loop runs until the channel is empty
-            // (or only contains peripheral commands), then re-arms the
-            // ready_to_receive wait.
-            loop {
-                match DFU_CHANNEL.try_peek() {
-                    // Central command — consume and process it
-                    Ok(cmd) if cmd.is_central() => {
-                        let Some(cmd) = DFU_CHANNEL.try_receive().ok() else {
-                            warn!("dfu: peek-receive race, skipping");
-                            continue;
-                        };
-                        self.handle_cmd(cmd).await;
-                    }
-                    // Peripheral command for an invalid id — drain it so it
-                    // doesn't block the channel forever
-                    #[cfg(feature = "dfu_split")]
-                    Ok(cmd) if !cmd.is_valid_peripheral() => {
-                        warn!("dfu: draining orphaned command for invalid peripheral target");
-                        let _ = DFU_CHANNEL.try_receive();
-                    }
-                    // Either empty or a peripheral command for a valid id —
-                    // leave it for the matching PeripheralManager to consume
-                    _ => break,
-                }
+            let cmd_event = sub.next_message_pure().await;
+            if cmd_event.0.is_central() {
+                self.handle_cmd(cmd_event.0).await;
+                DFU_PENDING.store(false, Ordering::Release);
+                continue;
             }
-            embassy_futures::yield_now().await; // give PeripheralManager a chance to run
+            #[cfg(feature = "dfu_split")]
+            if !cmd_event.0.is_valid_peripheral() {
+                warn!("dfu: dropping orphaned command for unknown peripheral target");
+                DFU_PENDING.store(false, Ordering::Release);
+                continue;
+            }
+            // Valid peripheral command — DFU_PENDING stays true until
+            // PeripheralManager finishes processing.
         }
     }
 }

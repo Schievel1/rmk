@@ -158,12 +158,20 @@ impl crate::KeyboardTomlConfig {
             clear_peer,
             dongle_state,
             dfu_status,
+            dfu_cmd,
             action,
         );
 
         // Auto-bump subscriber counts based on enabled feature flags.
         // Declarations live in subscriber_default.toml.
         apply_feature_subscriber_bumps(&mut events, active_features);
+        // Dynamically size dfu_cmd subscribers: 1 (central) + N (peripherals).
+        // The base count of 1 covers the central; each peripheral adds one.
+        if active_features.contains(&"dfu_split")
+            && let Some(event) = events.iter_mut().find(|e| e.name == "dfu_cmd")
+        {
+            event.subs += split_peripherals_num;
+        }
         if !split_battery_peripheral_ids.is_empty()
             && active_features.contains(&"split")
             && active_features.contains(&"_ble")

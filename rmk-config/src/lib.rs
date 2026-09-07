@@ -519,6 +519,7 @@ define_event_config!(
     dongle_state,
     // DFU events
     dfu_status,
+    dfu_cmd,
     // Action events
     action,
 );

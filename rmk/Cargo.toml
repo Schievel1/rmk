@@ -263,7 +263,7 @@ dfu_rp = ["_dfu", "dep:embassy-boot-rp", "dep:embassy-boot", "rp2040", "rmk-macr
 dfu_nrf = ["_dfu", "dep:embassy-boot", "dep:embassy-nrf", "rmk-macro/dfu_nrf"]
 ## **Experimental.** Enable split firmware update support — forward firmware to peripherals over
 ## split link. Requires `dfu_rp` or `dfu_nrf`. Wired split only.
-dfu_split = ["rmk-macro/dfu_split"]
+dfu_split = ["rmk-macro/dfu_split", "rmk-types/dfu_split"]
 
 ## Enable DFU writing to external SPI flash instead of internal DFU partition.
 ## Requires `dfu_rp` or `dfu_nrf`

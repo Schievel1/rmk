@@ -61,7 +61,7 @@ pub use action::ActionEvent;
 pub use battery::{BatteryAdcEvent, BatteryStatusEvent, ChargingStateEvent};
 pub use connection::{ConnectionStatus, ConnectionStatusChangeEvent, ConnectionType};
 #[cfg(feature = "_dfu")]
-pub use dfu::DfuStatusEvent;
+pub use dfu::{DfuCmdEvent, DfuStatusEvent};
 #[cfg(feature = "dongle")]
 pub use dongle::{DongleState, DongleStateEvent};
 pub use input::{
