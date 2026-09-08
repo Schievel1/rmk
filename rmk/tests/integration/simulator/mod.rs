@@ -13,11 +13,10 @@ pub mod flash;
 
 use core::future::Future;
 use core::pin::Pin;
-use std::cell::RefCell;
 
 #[cfg(feature = "storage")]
 use embassy_embedded_hal::adapter::BlockingAsync;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either, select, select4};
 use embassy_futures::yield_now;
 use embassy_time::{Duration, Timer};
 #[cfg(feature = "storage")]
@@ -368,13 +367,9 @@ impl SimKeyboard {
                 None => rmk::channel::drain_flash_channel_for_test().await,
             }
         };
-        // Likewise for the BLE profile task; what it received is kept for assertions.
-        let profile_actions = RefCell::new(Vec::new());
-        #[cfg(feature = "_ble")]
-        let profiles =
-            rmk::channel::drain_ble_profile_channel_for_test(|action| profile_actions.borrow_mut().push(action));
-        #[cfg(not(feature = "_ble"))]
-        let profiles = core::future::pending::<()>();
+        // Same for the BLE profile task, but keep what it received so tests can check it.
+        let mut profile_actions = Vec::new();
+        let profiles = rmk::channel::drain_ble_profile_channel_for_test(&mut profile_actions);
 
         // A host connection is just a byte stream: drive the production
         // `run_session` over an in-memory duplex, exactly as a USB/BLE transport
@@ -396,12 +391,12 @@ impl SimKeyboard {
         // None of these ever return; the timeline does, and dropping them is how
         // a run ends. One resolving first means a task died or, for the session,
         // that a framing guard rejected the stream.
-        let background = select(keyboard.run(), select(select(flash, profiles), session));
+        let background = select4(keyboard.run(), flash, profiles, session);
         match select(background, run_steps(steps, &to_device, &from_device)).await {
             Either::First(_) => panic!("a background task ended before the scripted steps finished"),
             Either::Second(()) => {}
         }
-        self.ble_profile_actions = profile_actions.into_inner();
+        self.ble_profile_actions = profile_actions;
 
         assert!(
             self.keyboard.held_buffer.is_empty(),

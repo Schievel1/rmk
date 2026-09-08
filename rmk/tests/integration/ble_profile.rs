@@ -40,6 +40,26 @@ fn intervening_key_cancels_the_hold() {
     });
 }
 
+// Typing over a held profile key cancels the gesture: the key stays down past
+// the 5s mark, so only the intervening press can disarm it.
+#[test]
+fn key_pressed_while_the_profile_key_is_down_cancels_the_bond_clear() {
+    test_block_on(async {
+        let mut keyboard = SimKeyboard::builder([[[USER0, k!(A)]]]).build().await;
+        keyboard
+            .press(0, 0)
+            .delay(100)
+            .tap(0, 1, 10)
+            .expect_keys([HidKeyCode::A])
+            .expect_keys([])
+            .delay(5200)
+            .release(0, 0)
+            .run()
+            .await;
+        assert_eq!(keyboard.ble_profile_actions(), ["Switch(0)"]);
+    });
+}
+
 // Regression: the tap side of a tap-hold armed the hold on its synthesized
 // press, nothing disarmed it, and the bond was wiped after 5s of idle.
 #[test]

@@ -4,8 +4,7 @@ use rmk_types::morse::MorsePattern;
 
 use crate::event::{KeyboardEvent, KeyboardEventPos};
 
-/// The buffer of held keys, kept in insertion order: `next_timeout` scans for the
-/// earliest deadline, and callers that need press order sort by `press_time` themselves.
+/// The buffer of held keys.
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HeldBuffer {

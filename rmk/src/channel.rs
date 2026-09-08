@@ -107,13 +107,19 @@ pub async fn drain_flash_channel_for_test() {
 #[cfg(feature = "_ble")]
 pub(crate) static BLE_PROFILE_CHANNEL: Channel<RawMutex, BleProfileAction, 1> = Channel::new();
 
-/// Test-only stand-in for the BLE profile task: hands each action's `Debug`
-/// form to `sink`, so a test can assert what a profile-key gesture sent.
-#[cfg(all(feature = "std", feature = "_ble"))]
+/// Test-only stand-in for the BLE profile task: records the `Debug` form of every
+/// received action in `sink`, so a test can check what a profile-key gesture sent.
+#[cfg(feature = "std")]
 #[doc(hidden)]
-pub async fn drain_ble_profile_channel_for_test(mut sink: impl FnMut(std::string::String)) {
+pub async fn drain_ble_profile_channel_for_test(sink: &mut std::vec::Vec<std::string::String>) {
+    #[cfg(feature = "_ble")]
     loop {
-        sink(std::format!("{:?}", BLE_PROFILE_CHANNEL.receive().await));
+        sink.push(std::format!("{:?}", BLE_PROFILE_CHANNEL.receive().await));
+    }
+    #[cfg(not(feature = "_ble"))]
+    {
+        let _ = sink;
+        core::future::pending::<()>().await
     }
 }
 
