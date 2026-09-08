@@ -30,14 +30,12 @@ use crate::RawMutex;
 use crate::channel::USB_REPORT_CHANNEL;
 use crate::config::DeviceConfig;
 use crate::core_traits::Runnable;
-#[cfg(feature = "dfu_lock")]
-use crate::dfu::DFU_STARTED;
 #[cfg(feature = "_dfu")]
 use crate::dfu::DFU_WRITE_FAILED;
 #[cfg(feature = "_dfu")]
 use crate::dfu::MAX_DFU_ALTS;
 #[cfg(feature = "_dfu")]
-use crate::dfu::{BLOCK_SIZE_DFU, DFU_PENDING, DfuCmd};
+use crate::dfu::{BLOCK_SIZE_DFU, DfuCmd};
 #[cfg(feature = "_dfu")]
 use crate::event::{DfuCmdEvent, DfuStatusEvent, publish_event};
 #[cfg(feature = "steno")]
@@ -287,10 +285,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         crate::dfu::dfu_lock_check()?;
         self.written = 0;
         info!("dfu: DFU download started ({:?})", self.target);
-        DFU_PENDING.store(true, Ordering::Release);
         publish_event(DfuCmdEvent(DfuCmd::Start(self.target)));
-        #[cfg(feature = "dfu_lock")]
-        DFU_STARTED.store(true, Ordering::Release);
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
         Ok(())
     }
@@ -304,7 +299,6 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
         self.written += data.len() as u32;
-        DFU_PENDING.store(true, Ordering::Release);
         publish_event(DfuCmdEvent(DfuCmd::Write(self.target, offset, buf)));
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         Ok(())
@@ -315,7 +309,6 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
             DFU_WRITE_FAILED.store(false, Ordering::Release);
             return Err(Status::ErrWrite);
         }
-        DFU_PENDING.store(true, Ordering::Release);
         publish_event(DfuCmdEvent(DfuCmd::Finish(self.target)));
         publish_event(DfuStatusEvent::new(DfuStatus::Finished));
         info!("dfu: DFU download complete");
@@ -323,7 +316,6 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
     }
 
     fn system_reset(&mut self) {
-        DFU_PENDING.store(true, Ordering::Release);
         publish_event(DfuCmdEvent(DfuCmd::SystemReset(self.target)));
     }
 }
@@ -381,7 +373,7 @@ impl Handler for UsbDfuIface {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         const DFU_GETSTATUS: u8 = 3;
 
-        if DFU_PENDING.load(Ordering::Acquire) && req.request == DFU_GETSTATUS {
+        if !crate::event::DfuCmdEvent::empty() && req.request == DFU_GETSTATUS {
             // Short-circuit: return dfuDNBUSY directly without
             // advancing the DfuState machine. The state stays in
             // DlSync so the next real GETSTATUS (after the queue

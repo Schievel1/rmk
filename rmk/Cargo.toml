@@ -124,7 +124,7 @@ host = ["dep:byteorder"]
 vial = ["host"]
 
 ## **Experimental.** Enable DFU lock feature — physical key unlock for DFU firmware download
-dfu_lock = ["host_lock"]
+dfu_lock = ["host_lock", "rmk-types/dfu_lock"]
 
 ## Enable physical key unlock and matrix state tracking — the shared base of the
 ## lock features (`dfu_lock` and `rynk` imply it; combine with `vial` for the

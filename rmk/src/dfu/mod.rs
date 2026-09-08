@@ -52,9 +52,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_boot::FirmwareState;
 pub use embassy_embedded_hal::flash::partition::Partition;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[cfg(feature = "dfu_lock")]
-use embassy_sync::signal::Signal;
+use embassy_futures::select::{Either, select};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embedded_storage_async::nor_flash::NorFlash;
 use heapless;
 use rmk_types::dfu::DfuStatus;
@@ -193,24 +193,27 @@ pub(crate) enum DfuCmd {
     Write(DfuTarget, u32, heapless::Vec<u8, { BLOCK_SIZE_DFU }>),
     Finish(DfuTarget),
     SystemReset(DfuTarget),
+    /// Wake-up signal from `dfu_lock_check()` to the `DfuLock` unlock state machine.
+    UnlockRequest,
 }
 
 impl DfuCmd {
-    /// The target (central or peripheral) of this command.
-    pub(crate) fn target(&self) -> DfuTarget {
+    /// The target (central or peripheral) of this command, if applicable.
+    pub(crate) fn target(&self) -> Option<DfuTarget> {
         match self {
-            DfuCmd::Start(t) | DfuCmd::Write(t, _, _) | DfuCmd::Finish(t) | DfuCmd::SystemReset(t) => *t,
+            DfuCmd::Start(t) | DfuCmd::Write(t, _, _) | DfuCmd::Finish(t) | DfuCmd::SystemReset(t) => Some(*t),
+            DfuCmd::UnlockRequest => None,
         }
     }
 
     /// Returns `true` when this command is for the central flash updater.
     pub(crate) fn is_central(&self) -> bool {
-        matches!(self.target(), DfuTarget::Central)
+        matches!(self.target(), Some(DfuTarget::Central))
     }
 
     /// Returns `true` when this command targets a known peripheral (valid id range).
     pub(crate) fn is_valid_peripheral(&self) -> bool {
-        matches!(self.target(), DfuTarget::Peripheral(id) if (id as usize) < MAX_DFU_ALTS)
+        matches!(self.target(), Some(DfuTarget::Peripheral(id)) if (id as usize) < MAX_DFU_ALTS)
     }
 }
 
@@ -222,14 +225,13 @@ pub(crate) static DFU_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 /// Gate shared by the transport's DFU start handlers (central alt 0 and the
 /// passthrough slots). Returns `Ok` when a download may proceed; while the
 /// keys are locked it wakes the unlock state machine and rejects the download
-/// with `ErrVendor`. The caller is responsible for setting `DFU_STARTED`
-/// after successfully enqueuing the command.
+/// with `ErrVendor`.
 pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::Status> {
     #[cfg(feature = "dfu_lock")]
     {
         use embassy_usb::class::dfu::consts::Status;
         if DFU_LOCKED.load(Ordering::Acquire) {
-            DFU_UNLOCK_SIGNAL.signal(());
+            publish_event(DfuCmdEvent(DfuCmd::UnlockRequest));
             info!("dfu_lock: DFU download rejected — keys not unlocked");
             return Err(Status::ErrVendor);
         }
@@ -240,11 +242,6 @@ pub(crate) fn dfu_lock_check() -> Result<(), embassy_usb::class::dfu::consts::St
 /// Max DFU alternate settings on a single DFU interface.
 /// Alt 0 is always the central; the remaining slots are split peripherals.
 pub(crate) const MAX_DFU_ALTS: usize = crate::SPLIT_PERIPHERALS_NUM + 1;
-
-/// Set to `true` by the USB proxy when a DFU command is published, and to
-/// `false` by the consumer after processing.  Used by `control_in` to
-/// return `dfuDNBUSY` while commands are still in flight.
-pub(crate) static DFU_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Flash-side DFU updater.
 ///
@@ -402,17 +399,14 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandle
             let cmd_event = sub.next_message_pure().await;
             if cmd_event.0.is_central() {
                 self.handle_cmd(cmd_event.0).await;
-                DFU_PENDING.store(false, Ordering::Release);
                 continue;
             }
             #[cfg(feature = "dfu_split")]
             if !cmd_event.0.is_valid_peripheral() {
                 warn!("dfu: dropping orphaned command for unknown peripheral target");
-                DFU_PENDING.store(false, Ordering::Release);
                 continue;
             }
-            // Valid peripheral command — DFU_PENDING stays true until
-            // PeripheralManager finishes processing.
+            // Valid peripheral command — handled by PeripheralManager.
         }
     }
 }
@@ -420,6 +414,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandle
 impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE> {
     async fn handle_cmd(&mut self, cmd: DfuCmd) {
         match cmd {
+            DfuCmd::UnlockRequest => {}
             DfuCmd::Start(DfuTarget::Central) => {
                 self.offset = 0;
                 DFU_WRITE_FAILED.store(false, Ordering::Release);
@@ -444,6 +439,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
                         DFU_WRITE_FAILED.store(true, Ordering::Release);
                         publish_event(DfuStatusEvent::new(DfuStatus::Error));
                     } else {
+                        info!("dfu: looks good, restarting");
                         match self.mark_updated_and_reset().await {
                             Ok(()) => info!("dfu: update complete, resetting"),
                             Err(()) => {
@@ -466,18 +462,13 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
 /// `true` while DFU is locked (default). Cleared by `DfuLock` when unlock keys are pressed.
 #[cfg(feature = "dfu_lock")]
 static DFU_LOCKED: AtomicBool = AtomicBool::new(true);
-/// `true` once a DFU download command has been successfully enqueued.
-#[cfg(feature = "dfu_lock")]
-pub(crate) static DFU_STARTED: AtomicBool = AtomicBool::new(false);
-/// Signalled by `dfu_lock_check()` to wake the `DfuLock` unlock state machine.
-#[cfg(feature = "dfu_lock")]
-static DFU_UNLOCK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Physical-key gate that prevents accidental or unauthorised DFU downloads.
 ///
 /// When enabled via the `dfu_lock` feature, every DFU download attempt
-/// (central or peripheral passthrough) first triggers [`DFU_UNLOCK_SIGNAL`].
-/// [`DfuLock`] picks up that signal, opens a 10 s unlock window, and polls
+/// (central or peripheral passthrough) first triggers a
+/// [`DfuCmd::UnlockRequest`](crate::dfu::DfuCmd::UnlockRequest) event.
+/// [`DfuLock`] picks up that event, opens a 10 s unlock window, and polls
 /// the matrix at 50 ms intervals looking for the key combination configured
 /// in `unlock_keys`.  Once all listed keys are pressed simultaneously the
 /// global [`DFU_LOCKED`] flag is cleared and another 10 s countdown starts —
@@ -507,63 +498,91 @@ impl<'a> DfuLock<'a> {
     pub fn new(unlock_keys: &'a [(u8, u8)], keymap: &'a crate::keymap::KeyMap<'a>) -> Self {
         Self { unlock_keys, keymap }
     }
-
-    /// Run one unlock cycle: wait for a DFU activity signal, then poll the
-    /// matrix for the unlock combination.  If the keys are pressed within
-    /// 10 s the lock is cleared and a second 10 s window is opened for the
-    /// host to start the download.  Returns once the download begins or
-    /// either window expires.
-    pub(crate) async fn process_unlock(&self) {
-        DFU_UNLOCK_SIGNAL.wait().await;
-
-        info!("dfu_lock: DFU activity detected, unlock window open for 10 s");
-        info!("dfu_lock: waiting for unlock keys");
-        publish_event(crate::event::DfuStatusEvent::new(DfuStatus::LockWaiting));
-        let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
-        loop {
-            let all_pressed = self
-                .unlock_keys
-                .iter()
-                .all(|(row, col)| self.keymap.read_matrix_key(*row, *col));
-            if all_pressed {
-                DFU_LOCKED.store(false, Ordering::Release);
-                info!("dfu_lock: unlock keys pressed, DFU unlocked for 10 s");
-                publish_event(crate::event::DfuStatusEvent::new(DfuStatus::LockUnlocked));
-                break;
-            }
-            if embassy_time::Instant::now() >= deadline {
-                info!("dfu_lock: unlock window expired (10 s timeout)");
-                DFU_LOCKED.store(true, Ordering::Release);
-                publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Idle));
-                return;
-            }
-            embassy_time::Timer::after_millis(50).await;
-        }
-
-        info!("dfu_lock: unlocked, waiting for DFU download");
-        let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
-        loop {
-            if DFU_STARTED.load(Ordering::Acquire) {
-                info!("dfu_lock: DFU download started, staying unlocked");
-                break;
-            }
-            if embassy_time::Instant::now() >= deadline {
-                info!("dfu_lock: unlock expired (10 s timeout)");
-                DFU_LOCKED.store(true, Ordering::Release);
-                publish_event(crate::event::DfuStatusEvent::new(DfuStatus::Idle));
-                break;
-            }
-            embassy_time::Timer::after_millis(200).await;
-        }
-    }
 }
 
 #[cfg(feature = "dfu_lock")]
 impl<'a> Runnable for DfuLock<'a> {
-    /// Runs the unlock loop forever — yields only between cycles.
+    /// Waits for a DFU download attempt, polls the matrix for the unlock
+    /// key combination, then monitors the download until completion or stall.
+    /// Re-locks automatically on every exit path.
     async fn run(&mut self) -> ! {
+        let mut dfu_cmd_sub = DfuCmdEvent::subscriber();
+
         loop {
-            self.process_unlock().await;
+            // 1. Warte auf UnlockRequest
+            match dfu_cmd_sub.next_message_pure().await {
+                DfuCmdEvent(DfuCmd::UnlockRequest) => {}
+                _ => continue,
+            }
+
+            info!("dfu_lock: DFU activity detected, unlock window open for 10 s");
+            info!("dfu_lock: waiting for unlock keys");
+            publish_event(DfuStatusEvent::new(DfuStatus::LockWaiting));
+
+            // 2. Unlock-Key-Polling (10 s)
+            let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
+            let mut unlocked = false;
+            loop {
+                let all_pressed = self
+                    .unlock_keys
+                    .iter()
+                    .all(|(row, col)| self.keymap.read_matrix_key(*row, *col));
+                if all_pressed {
+                    DFU_LOCKED.store(false, Ordering::Release);
+                    info!("dfu_lock: unlock keys pressed, DFU unlocked for 10 s");
+                    publish_event(DfuStatusEvent::new(DfuStatus::LockUnlocked));
+                    unlocked = true;
+                    break;
+                }
+                if embassy_time::Instant::now() >= deadline {
+                    info!("dfu_lock: unlock window expired (10 s timeout)");
+                    publish_event(DfuStatusEvent::new(DfuStatus::Idle));
+                    break;
+                }
+                embassy_time::Timer::after_millis(50).await;
+            }
+            if !unlocked {
+                continue;
+            }
+
+            // 3. Warte auf Start oder Timeout (10 s)
+            info!("dfu_lock: unlocked, waiting for DFU download");
+            let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
+            match select(dfu_cmd_sub.next_message_pure(), embassy_time::Timer::at(deadline)).await {
+                Either::First(DfuCmdEvent(DfuCmd::Start(_))) => {
+                    info!("dfu_lock: DFU download started");
+                }
+                _ => {
+                    info!("dfu_lock: unlock expired, no download started");
+                    DFU_LOCKED.store(true, Ordering::Release);
+                    publish_event(DfuStatusEvent::new(DfuStatus::Idle));
+                    continue;
+                }
+            }
+
+            // 4. Activity-basiertes Warten auf Finish
+            let mut write_deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(30);
+            loop {
+                match select(dfu_cmd_sub.next_message_pure(), embassy_time::Timer::at(write_deadline)).await {
+                    Either::First(DfuCmdEvent(DfuCmd::Write(..))) => {
+                        write_deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(30);
+                    }
+                    Either::First(DfuCmdEvent(DfuCmd::Finish(_))) => {
+                        info!("dfu_lock: download complete, re-locking");
+                        break;
+                    }
+                    Either::First(DfuCmdEvent(DfuCmd::SystemReset(_))) => {
+                        info!("dfu_lock: reset requested, re-locking");
+                        break;
+                    }
+                    _ => {
+                        info!("dfu_lock: download stalled (30 s no activity), re-locking");
+                        break;
+                    }
+                }
+            }
+            DFU_LOCKED.store(true, Ordering::Release);
+            publish_event(DfuStatusEvent::new(DfuStatus::Idle));
         }
     }
 }

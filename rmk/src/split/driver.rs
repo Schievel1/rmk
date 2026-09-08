@@ -147,6 +147,9 @@ pub(crate) struct PeripheralManager<T: SplitReader + SplitWriter> {
     /// Whether to skip hash comparison and always flash firmware.
     #[cfg(feature = "dfu_split")]
     policy: UpdatePolicy,
+    /// Set after a chunk fails all retries — aborts subsequent writes.
+    #[cfg(feature = "dfu_split")]
+    dfu_aborted: bool,
 }
 
 /// Defines how the central decides whether to flash a peripheral.
@@ -174,6 +177,8 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             passthrough_crc: crate::crc32::Crc32::new(),
             #[cfg(feature = "dfu_split")]
             policy,
+            #[cfg(feature = "dfu_split")]
+            dfu_aborted: false,
         }
     }
 
@@ -362,14 +367,18 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
         use embassy_time::{Duration, Instant, Timer};
 
         match cmd_event.0 {
+            crate::dfu::DfuCmd::UnlockRequest => {}
             crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
                 self.passthrough_crc = crate::crc32::Crc32::new();
+                self.dfu_aborted = false;
                 info!("dfu_split: DFU download started for peripheral {}", self.id);
-                crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
             }
             crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::Peripheral(id), base_offset, data)
                 if id == self.id as u8 =>
             {
+                if self.dfu_aborted {
+                    return;
+                }
                 // Split 512B USB block into 256B chunks for the split link
                 const MAX_RETRIES: u32 = 3;
                 for (chunk_idx, chunk) in data.chunks(crate::split::SPLIT_CHUNK_SIZE).enumerate() {
@@ -406,7 +415,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         };
                         if self.send(&msg).await.is_err() {
                             error!("dfu_split: disconnected during chunk send");
-                            crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                             return;
                         }
 
@@ -450,22 +458,24 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
                     if !acked {
                         error!(
-                            "dfu_split: chunk at offset {} failed after {} retries",
-                            chunk_offset, MAX_RETRIES
+                            "dfu_split: chunk at offset {} failed after {} retries, giving up on peripheral {}",
+                            chunk_offset, MAX_RETRIES, self.id
                         );
+                        self.dfu_aborted = true;
+                        crate::dfu::DFU_WRITE_FAILED.store(true, core::sync::atomic::Ordering::Release);
                         publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
-                        crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                         return;
                     }
                 }
-                crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
             }
             crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+                if self.dfu_aborted {
+                    return;
+                }
                 info!("dfu_split: DFU download complete, starting end-to-end verification");
 
                 if self.send(&SplitMessage::FirmwareUpdateComplete).await.is_err() {
                     error!("dfu_split: disconnected during finish");
-                    crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                     return;
                 }
 
@@ -489,7 +499,6 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     error!("dfu_split: CRC verification failed");
                     self.send(&SplitMessage::FirmwareCrcFail).await.ok();
                     publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
-                    crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                     return;
                 };
 
@@ -503,14 +512,12 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     );
                     self.send(&SplitMessage::FirmwareCrcFail).await.ok();
                     publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
-                    crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                     return;
                 }
 
                 info!("dfu_split: CRC OK, confirming update");
                 if self.send(&SplitMessage::FirmwareCrcOk).await.is_err() {
                     error!("dfu_split: disconnected during CRC OK");
-                    crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
                     return;
                 }
 
@@ -533,16 +540,15 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         }
                     }
                 }
-                crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
             }
             crate::dfu::DfuCmd::SystemReset(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+                self.dfu_aborted = false;
                 info!("dfu_split: forwarding system reset to peripheral {}", self.id);
                 if self.send(&SplitMessage::SystemReset).await.is_err() {
                     error!("dfu_split: disconnected during system reset");
                 }
-                crate::dfu::DFU_PENDING.store(false, core::sync::atomic::Ordering::Release);
             }
-            _ => {} // Central command or other peripheral — skip, DON'T clear DFU_PENDING
+            _ => {} // Central command or other peripheral — skip
         }
     }
 
