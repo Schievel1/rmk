@@ -1700,11 +1700,7 @@ impl<'a> Keyboard<'a> {
             use crate::channel::BLE_PROFILE_CHANNEL;
             if event.pressed {
                 // The uniform gesture across all bond slots: tap switches, a 5s
-                // hold forgets the slot's bond and re-pairs (holding a profile key
-                // clears that profile and switches to it, so it advertises openly;
-                // the dongle key seeks a new dongle; the peer key clears the split
-                // peer). The hold is deadline-driven from `run()`: arming returns
-                // immediately, so the task keeps servicing events while it's down.
+                // hold forgets the slot's bond, switches to it, then repairs.
                 let arm = id < NUM_BLE_PROFILE as u8;
                 #[cfg(feature = "split")]
                 let arm = arm || id == NUM_BLE_PROFILE as u8 + 4;
@@ -1714,11 +1710,9 @@ impl<'a> Keyboard<'a> {
                     self.user_hold = Some((Instant::now() + Self::USER_HOLD_DURATION, id));
                 }
             } else {
-                // A replayed press and release must not leave the gesture armed.
+                // A replayed press and release clear the hold.
                 self.user_hold = None;
                 // Other user keys are processed when released.
-                // Slots 0..NUM_BLE_PROFILE select a profile directly; the next four are
-                // fixed actions stacked on top.
                 if id < NUM_BLE_PROFILE as u8 {
                     info!("Switch to profile: {}", id);
                     BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
@@ -1737,9 +1731,7 @@ impl<'a> Keyboard<'a> {
                     #[cfg(not(feature = "_no_usb"))]
                     crate::state::toggle_preferred().await;
                 }
-                // Short press of the dongle key: switch to the dongle slot. Also runs
-                // after a 5s hold, where it is a no-op (the hold already put the
-                // keyboard on the dongle profile or was an in-place authorization).
+                // Switch to the dongle slot.
                 #[cfg(feature = "dongle")]
                 if id == NUM_BLE_PROFILE as u8 + 5 {
                     info!("Switch to dongle profile");
