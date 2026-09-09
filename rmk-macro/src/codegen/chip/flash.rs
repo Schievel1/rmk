@@ -301,7 +301,7 @@ fn expand_external_flash_init(
         #spi_init
         #flash_init
         let dfu_mutex = ::embassy_sync::mutex::Mutex::<
-            ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            ::rmk::RawMutex,
             _,
         >::new(ext_flash);
         let dfu_partition = ::rmk::dfu::Partition::new(

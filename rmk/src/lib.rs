@@ -67,7 +67,7 @@ pub(crate) mod fmt;
 
 pub use embassy_futures;
 #[cfg(not(any(cortex_m)))]
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
+pub use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 #[cfg(cortex_m)]
 pub use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex as RawMutex;
 pub use embassy_time;

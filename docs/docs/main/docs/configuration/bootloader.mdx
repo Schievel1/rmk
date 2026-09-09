@@ -255,6 +255,8 @@ sck = "PIN_18"
 mosi = "PIN_19"
 miso = "PIN_16"
 cs = "PIN_17"
+tx_dma = "DMA_CH3"   # required for async SPI on RP2040
+rx_dma = "DMA_CH4"   # required for async SPI on RP2040
 ```
 
 Enable the feature in `Cargo.toml`:
@@ -332,6 +334,8 @@ sck = "PIN_18"
 mosi = "PIN_19"
 miso = "PIN_16"
 cs = "PIN_17"
+tx_dma = "DMA_CH3"   # required for async SPI on RP2040
+rx_dma = "DMA_CH4"   # required for async SPI on RP2040
 ```
 
 The function must have the signature:

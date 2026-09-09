@@ -54,7 +54,6 @@ use embassy_boot::FirmwareState;
 pub use embassy_embedded_hal::flash::partition::Partition;
 #[cfg(feature = "dfu_lock")]
 use embassy_futures::select::{Either, select};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embedded_storage_async::nor_flash::NorFlash;
 use heapless;
 use rmk_types::dfu::DfuStatus;
@@ -127,7 +126,7 @@ pub fn dfu_flash_layout() -> DfuFlashLayout {
 }
 
 /// Mutex guarding the flash, shared by all partitions.
-pub type FlashMutex<F> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, F>;
+pub type FlashMutex<F> = embassy_sync::mutex::Mutex<crate::RawMutex, F>;
 
 /// Build the storage, boot state and DFU download partitions from the
 /// `memory.x` layout (see [`dfu_flash_layout`]).
@@ -142,9 +141,9 @@ pub type FlashMutex<F> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, F>;
 pub fn partitions_from_linkerscript<'a, F: NorFlash>(
     flash_mutex: &'a FlashMutex<F>,
 ) -> (
-    Partition<'a, CriticalSectionRawMutex, F>,
-    Partition<'a, CriticalSectionRawMutex, F>,
-    Partition<'a, CriticalSectionRawMutex, F>,
+    Partition<'a, crate::RawMutex, F>,
+    Partition<'a, crate::RawMutex, F>,
+    Partition<'a, crate::RawMutex, F>,
 ) {
     let layout = dfu_flash_layout();
     let storage = Partition::new(flash_mutex, layout.storage_offset, layout.storage_size);
@@ -291,7 +290,16 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
     /// is encountered. This avoids a long blocking erase of the entire
     /// DFU partition on the very first chunk.
     pub async fn write_chunk(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
-        // Log once on the first call so the user sees progress.
+        if offset == 0 {
+            // New download session: drop stale state from an aborted previous
+            // session so its tail can't poison this image's CRC and its erase
+            // cache can't skip erasing page 0. The central always streams
+            // monotonically from 0; chunk-0 retries happen before any other
+            // offset is written, so this is safe.
+            self.written_len = 0;
+            self.last_erased_page = None;
+        }
+        // Log once per session so the user sees progress.
         if self.written_len == 0 {
             info!("dfu: firmware update started");
         }

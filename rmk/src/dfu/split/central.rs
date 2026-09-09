@@ -1,8 +1,8 @@
 use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
+use crate::RawMutex;
 use crate::dfu::MAX_DFU_ALTS;
 
 /// A firmware binary reference and its pre-computed CRC-32.
@@ -16,7 +16,7 @@ struct FirmwareSlot {
 /// Populated via [`set_firmware_update_data`].
 /// Looked up by [`PeripheralManager`] on
 /// connection to decide whether an update is needed.
-static FW_SLOTS: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<(usize, FirmwareSlot), MAX_DFU_ALTS>>> =
+static FW_SLOTS: Mutex<crate::RawMutex, RefCell<heapless::Vec<(usize, FirmwareSlot), MAX_DFU_ALTS>>> =
     Mutex::new(RefCell::new(heapless::Vec::new()));
 
 /// Register a peripheral firmware binary for automatic dfu_split updates.

@@ -11,6 +11,8 @@ use crate::event::{KeyboardEvent, PointingEvent};
 #[cfg(feature = "_ble")]
 pub mod ble;
 pub mod central;
+#[cfg(feature = "dfu_split")]
+pub(crate) mod dfu;
 /// Common abstraction layer of split driver
 pub(crate) mod driver;
 pub mod peripheral;
