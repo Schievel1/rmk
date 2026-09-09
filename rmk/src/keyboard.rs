@@ -1,7 +1,5 @@
 use core::fmt::Debug;
 
-#[cfg(feature = "_ble")]
-use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 #[cfg(feature = "_ble")]
 use embassy_sync::signal::Signal;
@@ -143,40 +141,18 @@ impl Runnable for Keyboard<'_> {
     /// The report is sent using `send_report`.
     async fn run(&mut self) -> ! {
         loop {
-            // TODO: Now the unprocessed_events is only used in held_for_5s.
-            // Maybe it can be removed in the future?
-            if !self.unprocessed_events.is_empty() {
-                // Process unprocessed events
-                let e = self.unprocessed_events.remove(0);
-                debug!("Unprocessed event: {:?}", e);
-                self.process_inner(e).await
-            } else if let Some(key) = self.next_buffered_key() {
-                // Process buffered held key
-                self.process_buffered_key(key).await
-            } else {
-                // If a mouse repeat or one-shot expiry is pending, race subscriber against the earliest deadline
-                let deadline = [self.mouse.next_deadline(), self.osm_deadline, self.osl_deadline]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                let event = if let Some(deadline) = deadline {
-                    match with_deadline(deadline, self.keyboard_event_subscriber.next_message_pure()).await {
-                        Ok(event) => event,
-                        Err(_) => {
-                            // Deadline expired: fire pending one-shot expiry and/or mouse repeat
-                            self.fire_oneshot_timeout().await;
-                            if self.mouse.next_deadline().is_some_and(|d| d <= Instant::now()) {
-                                self.fire_mouse_repeat().await;
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    // No repeat pending, wait indefinitely
-                    self.keyboard_event_subscriber.next_message_pure().await
-                };
-                self.process_inner(event).await
+            // Wait for the next event, but wake up at the earliest pending deadline.
+            // `with_deadline` polls the subscriber first, so a queued event is handled first.
+            let event = match self.next_deadline() {
+                Some(deadline) => with_deadline(deadline, self.keyboard_event_subscriber.next_message_pure())
+                    .await
+                    .ok(),
+                None => Some(self.keyboard_event_subscriber.next_message_pure().await),
             };
+            match event {
+                Some(event) => self.process_inner(event).await,
+                None => self.fire_expired().await,
+            }
 
             // Run any macros triggered while handling the event.
             while let Ok((macro_idx, event)) = crate::channel::MACRO_TRIGGER_CHANNEL.try_receive() {
@@ -200,9 +176,6 @@ pub struct Keyboard<'a> {
         { crate::KEYBOARD_EVENT_PUB_SIZE },
     >,
 
-    /// Unprocessed events
-    pub unprocessed_events: Vec<KeyboardEvent, 4>,
-
     /// Buffered held keys
     pub held_buffer: HeldBuffer,
 
@@ -225,6 +198,11 @@ pub struct Keyboard<'a> {
 
     /// Expiry deadline while the oneshot modifiers are armed (`Single`)
     osm_deadline: Option<Instant>,
+
+    /// The pending User-key hold gesture: when it fires, and the id of the held key.
+    /// Any key event cancels it.
+    #[cfg(feature = "_ble")]
+    user_hold: Option<(Instant, u8)>,
 
     /// Caps Word state machine
     caps_word: CapsWordState,
@@ -281,13 +259,14 @@ impl<'a> Keyboard<'a> {
             osl_deadline: None,
             osm_state: OneShotState::default(),
             osm_deadline: None,
+            #[cfg(feature = "_ble")]
+            user_hold: None,
             caps_word: CapsWordState::default(),
             with_modifiers: ModifierCombination::default(),
             macro_texting: false,
             macro_caps: false,
             fork_states: [None; FORK_MAX_NUM],
             fork_keep_mask: ModifierCombination::default(),
-            unprocessed_events: Vec::new(),
             held_buffer: HeldBuffer::new(),
             registered_keys: [None; 6],
             held_modifiers: ModifierCombination::default(),
@@ -315,65 +294,83 @@ impl<'a> Keyboard<'a> {
         send_hid_report(report).await;
     }
 
-    /// Get a copy of the next timeout key in the buffer,
-    /// which is either a combo component that is waiting for other combo keys,
-    /// or a morse key that is in the pressed or released state.
-    pub fn next_buffered_key(&mut self) -> Option<HeldKey> {
+    /// A copy of the buffered key that times out first: a combo key waiting for
+    /// its partners, or a morse key waiting out its timeout.
+    pub fn next_buffered_key(&self) -> Option<HeldKey> {
         self.held_buffer.next_timeout(|k| {
-            matches!(
-                k.state,
-                KeyState::Released(_) | KeyState::EarlyFired(_) | KeyState::WaitingCombo
-            ) || (matches!(k.state, KeyState::Pressed(_)) && k.action.is_morse())
+            matches!(k.state, KeyState::WaitingCombo)
+                || (k.action.is_morse()
+                    && matches!(
+                        k.state,
+                        KeyState::Pressed(_) | KeyState::Released(_) | KeyState::EarlyFired(_)
+                    ))
         })
     }
 
-    /// Process the latest buffered key.
-    ///
-    /// The given holding key is a copy of the buffered key. Only tap-hold keys are considered now.
-    pub async fn process_buffered_key(&mut self, key: HeldKey) {
-        debug!(
-            "Processing buffered key: \nevent: {:?} state: {:?}",
-            key.event, key.state
-        );
+    /// The earliest time `run()` must wake up. Every deadline returned here has to be
+    /// cleared or moved forward by `fire_expired`, otherwise `run()` busy-loops on it.
+    fn next_deadline(&self) -> Option<Instant> {
+        let buffered = self.next_buffered_key().map(|k| k.timeout_time);
+        // A buffered key may still use the one-shot it was pressed under, so the
+        // one-shot can only expire when the buffer is empty.
+        let one_shot = if buffered.is_some() {
+            None
+        } else {
+            [self.osm_deadline, self.osl_deadline].into_iter().flatten().min()
+        };
+        [
+            one_shot,
+            #[cfg(feature = "_ble")]
+            self.user_hold.map(|(at, _)| at),
+            buffered,
+            self.mouse.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Handle every deadline that is due. Each step checks its own deadline, so
+    /// calling this too early does nothing.
+    async fn fire_expired(&mut self) {
+        match self.next_buffered_key() {
+            // `next_deadline` hides the one-shot while a key is buffered, so at most
+            // one of these two can be due.
+            Some(key) => self.fire_buffered_key_timeout(key).await,
+            None => self.fire_oneshot_timeout().await,
+        }
+        #[cfg(feature = "_ble")]
+        self.fire_user_hold().await;
+        self.fire_mouse_repeat().await;
+    }
+
+    /// Resolve `key` if its timeout has passed: dispatch the combo it waits on, or
+    /// hand it to the morse timeout. Only one key per call, so `run()` can handle a
+    /// queued event before the next timeout.
+    async fn fire_buffered_key_timeout(&mut self, key: HeldKey) {
+        if key.timeout_time > Instant::now() {
+            return;
+        }
         match key.state {
             KeyState::WaitingCombo => {
-                debug!(
-                    "[Combo] Waiting combo, timeout in: {:?}ms",
-                    (key.timeout_time.saturating_duration_since(Instant::now())).as_millis()
-                );
-                match with_deadline(key.timeout_time, self.keyboard_event_subscriber.next_message_pure()).await {
-                    Ok(event) => {
-                        // Process new key event
-                        debug!("[Combo] Interrupted by a new key event: {:?}", event);
-                        self.process_inner(event).await;
-                    }
-                    Err(_timeout) => {
-                        // Timeout, dispatch combo
-                        debug!("[Combo] Timeout, dispatch combo");
-                        self.dispatch_combos(&key.action, key.event).await;
-                    }
-                }
+                debug!("[Combo] Timeout, dispatch combo");
+                self.dispatch_combos(&key.action, key.event).await;
             }
-            KeyState::Pressed(_) | KeyState::Released(_) | KeyState::EarlyFired(_) if key.action.is_morse() => {
-                // Wait for timeout or new key event
-                info!("Waiting morse key: {:?}", key.action);
-                match with_deadline(key.timeout_time, self.keyboard_event_subscriber.next_message_pure()).await {
-                    Ok(event) => {
-                        debug!("Buffered morse key interrupted by a new key event: {:?}", event);
-                        self.process_inner(event).await;
-                    }
-                    Err(_timeout) => {
-                        debug!("Buffered morse key timeout");
-                        self.handle_morse_timeout(&key).await;
-                    }
-                }
+            _ => {
+                debug!("Buffered morse key timeout");
+                self.handle_morse_timeout(&key).await;
             }
-            _ => (),
         }
     }
 
     /// Process key changes at (row, col)
     pub async fn process_inner(&mut self, event: KeyboardEvent) {
+        // A User-key hold gesture needs 5s without any key event, so cancel it here.
+        #[cfg(feature = "_ble")]
+        {
+            self.user_hold = None;
+        }
+
         // Check for mode transitions (e.g., entering/exiting passkey entry)
         #[cfg(feature = "passkey_entry")]
         self.passkey_entry_state.check_mode_transition();
@@ -435,18 +432,19 @@ impl<'a> Keyboard<'a> {
             }
             KeyBehaviorDecision::Buffer => {
                 debug!("Current key is buffered");
-                let timeout_time = if key_action.is_morse() {
-                    event_time + Self::morse_timeout(self.keymap, key_action, true)
+                if key_action.is_morse() {
+                    // A morse key may already have an entry here, and the morse press path
+                    // continues that pattern. Pushing would leave two entries for one key.
+                    self.process_key_action_morse(key_action, event, event_time).await;
                 } else {
-                    event_time
-                };
-                self.held_buffer.push(HeldKey::new(
-                    event,
-                    *key_action,
-                    KeyState::Pressed(MorsePattern::default()),
-                    event_time,
-                    timeout_time,
-                ));
+                    self.held_buffer.push(HeldKey::new(
+                        event,
+                        *key_action,
+                        KeyState::Pressed(MorsePattern::default()),
+                        event_time,
+                        event_time,
+                    ));
+                }
             }
             KeyBehaviorDecision::Ignore => {
                 debug!("Current key is ignored or not buffered, process normally: {:?}", event);
@@ -527,7 +525,7 @@ impl<'a> Keyboard<'a> {
                                 self.process_key_action_normal(action, held_key.event).await;
                                 held_key.state = KeyState::ProcessedButReleaseNotReportedYet(action);
                                 // Push back after triggered tap
-                                self.held_buffer.push_without_sort(held_key);
+                                self.held_buffer.push(held_key);
                             }
                             KeyState::Released(pattern) => {
                                 // In this state pattern is not surely finished,
@@ -566,7 +564,7 @@ impl<'a> Keyboard<'a> {
                                     self.process_key_action_normal(action, held_key.event).await;
                                     held_key.state = KeyState::ProcessedButReleaseNotReportedYet(action);
                                     // Push back after triggered hold
-                                    self.held_buffer.push_without_sort(held_key);
+                                    self.held_buffer.push(held_key);
                                 }
                                 KeyState::Released(pattern) => {
                                     debug!("pattern after released, permissive hold: {:?}", pattern);
@@ -639,7 +637,7 @@ impl<'a> Keyboard<'a> {
                                 _ => {} // For morse, the releasing will not be processed immediately, so just ignore it
                             }
                             // Push back after triggered hold
-                            self.held_buffer.push_without_sort(held_key);
+                            self.held_buffer.push(held_key);
                         }
                     }
 
@@ -1042,7 +1040,6 @@ impl<'a> Keyboard<'a> {
             new_event.pressed = true;
             self.process_key_action(&action, new_event, true, Instant::now()).await;
             debug!("[Combo] {:?} triggered", action);
-            embassy_time::Timer::after_millis(20).await;
             // Reset other combos shadowed by the one that just fired.
             self.reset_shadowed_combos(&combo_actions);
         }
@@ -1213,17 +1210,22 @@ impl<'a> Keyboard<'a> {
     async fn dispatch_combos(&mut self, key_action: &KeyAction, event: KeyboardEvent) {
         self.trigger_delayed_combo(key_action, event).await;
 
-        // Dispatch all keys with state `WaitingCombo` in the held buffer
-        let mut i = 0;
-        while i < self.held_buffer.keys.len() {
-            if self.held_buffer.keys[i].state == KeyState::WaitingCombo {
-                let key = self.held_buffer.keys.swap_remove(i);
-                debug!("[Combo] Dispatching combo: {:?}", key);
-                self.process_key_action(&key.action, key.event, false, key.press_time)
-                    .await;
-            } else {
-                i += 1;
-            }
+        // Dispatch every waiting key, earliest press first. Dispatching one key can
+        // remove and re-push others, so look the next one up again instead of
+        // reusing an index.
+        while let Some(i) = self
+            .held_buffer
+            .keys
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.state == KeyState::WaitingCombo)
+            .min_by_key(|(_, k)| k.press_time)
+            .map(|(i, _)| i)
+        {
+            let key = self.held_buffer.keys.remove(i);
+            debug!("[Combo] Dispatching combo: {:?}", key);
+            self.process_key_action(&key.action, key.event, false, key.press_time)
+                .await;
         }
 
         // Reset triggered combo states
@@ -1682,26 +1684,6 @@ impl<'a> Keyboard<'a> {
         }
     }
 
-    /// True when the key is still down 5s later. A release inside the window is
-    /// pushed back to `unprocessed_events`, so it replays as a short press.
-    #[cfg(feature = "_ble")]
-    async fn held_for_5s(&mut self) -> bool {
-        match select(
-            embassy_time::Timer::after_millis(5000),
-            self.keyboard_event_subscriber.next_message_pure(),
-        )
-        .await
-        {
-            Either::First(_) => true,
-            Either::Second(e) => {
-                if self.unprocessed_events.push(e).is_err() {
-                    warn!("Unprocessed event queue is full, dropping event");
-                }
-                false
-            }
-        }
-    }
-
     async fn process_user(&mut self, id: u8, event: KeyboardEvent) {
         debug!("Processing user key id: {:?}, event: {:?}", id, event);
 
@@ -1711,34 +1693,13 @@ impl<'a> Keyboard<'a> {
             use crate::ble::profile::BleProfileAction;
             use crate::channel::BLE_PROFILE_CHANNEL;
             if event.pressed {
-                // The uniform gesture across all bond slots: tap switches, a 5s
-                // hold forgets the slot's bond and re-pairs. Holding a profile key
-                // clears that profile and switches to it, so it advertises openly.
-                if id < NUM_BLE_PROFILE as u8 && self.held_for_5s().await {
-                    info!("Profile key held: clearing bond on profile {}", id);
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::ClearSlot(id)).await;
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
-                }
-                // A 5s hold of the dongle key clears the local dongle bond and goes
-                // seeking, which is how a keyboard moves to a different dongle.
-                #[cfg(feature = "dongle")]
-                if id == NUM_BLE_PROFILE as u8 + 5 && self.held_for_5s().await {
-                    use crate::ble::profile::DONGLE_PROFILE;
-                    info!("Dongle key held: clearing dongle bond, seeking a dongle");
-                    BLE_PROFILE_CHANNEL
-                        .send(BleProfileAction::ClearSlot(DONGLE_PROFILE))
-                        .await;
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(DONGLE_PROFILE)).await;
-                }
-                #[cfg(feature = "split")]
-                if id == NUM_BLE_PROFILE as u8 + 4 && self.held_for_5s().await {
-                    publish_event(ClearPeerEvent);
-                    info!("Clear peer");
-                }
+                // Start the 5s hold gesture for any user key. `fire_user_hold` decides
+                // which ids actually do something, so the id list lives in one place.
+                self.user_hold = Some((Instant::now() + Duration::from_secs(5), id));
             } else {
+                // A tap sends press and release back to back, so cancel what the press started.
+                self.user_hold = None;
                 // Other user keys are processed when released.
-                // Slots 0..NUM_BLE_PROFILE select a profile directly; the next four are
-                // fixed actions stacked on top.
                 if id < NUM_BLE_PROFILE as u8 {
                     info!("Switch to profile: {}", id);
                     BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
@@ -1757,9 +1718,7 @@ impl<'a> Keyboard<'a> {
                     #[cfg(not(feature = "_no_usb"))]
                     crate::state::toggle_preferred().await;
                 }
-                // Short press of the dongle key: switch to the dongle slot. Also runs
-                // after a 5s hold, where it is a no-op (the hold already put the
-                // keyboard on the dongle profile or was an in-place authorization).
+                // Switch to the dongle slot.
                 #[cfg(feature = "dongle")]
                 if id == NUM_BLE_PROFILE as u8 + 5 {
                     info!("Switch to dongle profile");
@@ -1768,6 +1727,41 @@ impl<'a> Keyboard<'a> {
                         .await;
                 }
             }
+        }
+    }
+
+    /// Run the gesture of a User key held for the full 5s; ids without one do nothing.
+    /// Getting here means no key event arrived meanwhile, because any event cancels
+    /// the hold.
+    #[cfg(feature = "_ble")]
+    async fn fire_user_hold(&mut self) {
+        use crate::NUM_BLE_PROFILE;
+        use crate::ble::profile::BleProfileAction;
+        use crate::channel::BLE_PROFILE_CHANNEL;
+
+        let Some((_, id)) = self.user_hold.take_if(|(at, _)| *at <= Instant::now()) else {
+            return;
+        };
+
+        // Tapping a bond slot switches to it; holding it forgets the bond, switches, then re-pairs.
+        if id < NUM_BLE_PROFILE as u8 {
+            info!("Profile key held: clearing bond on profile {}", id);
+            BLE_PROFILE_CHANNEL.send(BleProfileAction::ClearSlot(id)).await;
+            BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
+        }
+        #[cfg(feature = "split")]
+        if id == NUM_BLE_PROFILE as u8 + 4 {
+            info!("Clear peer");
+            publish_event(ClearPeerEvent);
+        }
+        #[cfg(feature = "dongle")]
+        if id == NUM_BLE_PROFILE as u8 + 5 {
+            use crate::ble::profile::DONGLE_PROFILE;
+            info!("Dongle key held: clearing dongle bond, seeking a dongle");
+            BLE_PROFILE_CHANNEL
+                .send(BleProfileAction::ClearSlot(DONGLE_PROFILE))
+                .await;
+            BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(DONGLE_PROFILE)).await;
         }
     }
 
@@ -2147,7 +2141,8 @@ mod test {
 
     async fn force_timeout_first_hold(keyboard: &mut Keyboard<'static>) {
         let key = keyboard.next_buffered_key().unwrap();
-        keyboard.process_buffered_key(key).await;
+        embassy_time::Timer::at(key.timeout_time).await;
+        keyboard.fire_buffered_key_timeout(key).await;
     }
 
     fn create_test_keyboard_with_forks(fork1: Fork, fork2: Fork) -> Keyboard<'static> {
@@ -2319,9 +2314,7 @@ mod test {
 
             // Here release event should make again into hold
 
-            // Under embassy-time/mock-driver (the test config), `Timer::after`
-            // would never resolve here because nothing else drives the clock.
-            // Bump virtual time directly.
+            // Skip ahead 200ms of virtual time.
             embassy_time::MockDriver::get().advance(Duration::from_millis(200));
             // after another key is pressed, that key is repeated
             keyboard.process_inner(KeyboardEvent::key(0, 0, true)).await;
@@ -2590,9 +2583,7 @@ mod test {
             assert_eq!(keyboard.resolve_modifiers(false), ModifierCombination::new());
             assert_eq!(keyboard.mouse.report.buttons, 0);
 
-            // Under embassy-time/mock-driver (the test config), `Timer::after`
-            // would never resolve here because nothing else drives the clock.
-            // Bump virtual time directly.
+            // Skip ahead 200ms of virtual time.
             embassy_time::MockDriver::get().advance(Duration::from_millis(200));
 
             // Press Z key, by itself it should emit 'MouseBtn5'
