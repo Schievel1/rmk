@@ -360,22 +360,20 @@ impl<'a> Keyboard<'a> {
                 timeout_event.pressed = false;
                 self.trigger_delayed_combo(&key.action, timeout_event).await;
 
-                if self
+                if let Some(key) = self
                     .held_buffer
                     .remove_if(|k| k.event.pos == key.event.pos && k.state == KeyState::WaitingCombo)
-                    .is_none()
                 {
-                    return;
+                    self.keymap.with_combos_mut(|combos| {
+                        combos
+                            .iter_mut()
+                            .flatten()
+                            .filter(|combo| !combo.is_triggered() && combo.config.contains(&key.action))
+                            .for_each(Combo::reset);
+                    });
+                    self.process_key_action(&key.action, key.event, false, key.press_time)
+                        .await;
                 }
-                self.keymap.with_combos_mut(|combos| {
-                    combos
-                        .iter_mut()
-                        .filter_map(|combo| combo.as_mut())
-                        .filter(|combo| !combo.is_triggered() && combo.config.contains(&key.action))
-                        .for_each(Combo::reset);
-                });
-                self.process_key_action(&key.action, key.event, false, key.press_time)
-                    .await;
             }
             _ => {
                 debug!("Buffered morse key timeout");
