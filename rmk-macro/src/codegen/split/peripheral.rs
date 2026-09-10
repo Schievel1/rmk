@@ -406,15 +406,6 @@ fn expand_split_peripheral(
         chip_init.extend(quote! { #flash_init });
     }
 
-    // Clone the partitions for over-the-split-link firmware updates so the
-    // originals can still be moved into the USB DFU updater below.
-    let dfu_split_enabled = is_feature_enabled(rmk_features, "dfu_split");
-    if dfu_enabled && dfu_split_enabled {
-        chip_init.extend(quote! {
-            let split_dfu_partition = dfu_partition.clone();
-            let split_state_partition = state_partition.clone();
-        });
-    }
     let usb_log_enabled = is_feature_enabled(rmk_features, "usb_log");
     let usb_enabled = dfu_enabled || usb_log_enabled;
 
@@ -573,7 +564,6 @@ fn expand_split_peripheral(
         watchdog_task,
         usb_task_future,
         dfu_task,
-        dfu_enabled && dfu_split_enabled,
     );
 
     quote! {
@@ -603,7 +593,6 @@ fn expand_split_peripheral_entry(
     watchdog_task: Option<TokenStream2>,
     usb_task_future: Option<TokenStream2>,
     dfu_task: Option<TokenStream2>,
-    dfu_split_enabled: bool,
 ) -> TokenStream2 {
     // Add matrix to devices, and run all devices
     let mut devs = devices.clone();
@@ -681,18 +670,8 @@ fn expand_split_peripheral_entry(
                     .instance
                     .to_lowercase()
             );
-            let peripheral_run = if dfu_split_enabled {
-                quote! {
-                    ::rmk::split::peripheral::run_rmk_split_peripheral(
-                        #uart_instance,
-                        split_dfu_partition,
-                        split_state_partition,
-                    )
-                }
-            } else {
-                quote! {
-                    ::rmk::split::peripheral::run_rmk_split_peripheral(#uart_instance)
-                }
+            let peripheral_run = quote! {
+                ::rmk::split::peripheral::run_rmk_split_peripheral(#uart_instance)
             };
             let mut tasks = vec![device_task, peripheral_run];
             tasks.extend(registered_processors);

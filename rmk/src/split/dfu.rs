@@ -50,12 +50,12 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
         match cmd_event.0 {
             crate::dfu::DfuCmd::UnlockRequest => {}
-            crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+            crate::dfu::DfuCmd::Start(crate::dfu::DfuTarget::ForwardPeripheral(id)) if id == self.id as u8 => {
                 self.passthrough_crc = crate::crc32::Crc32::new();
                 self.dfu_aborted = false;
                 info!("dfu_split: DFU download started for peripheral {}", self.id);
             }
-            crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::Peripheral(id), base_offset, data)
+            crate::dfu::DfuCmd::Write(crate::dfu::DfuTarget::ForwardPeripheral(id), base_offset, data)
                 if id == self.id as u8 =>
             {
                 if self.dfu_aborted {
@@ -148,7 +148,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     }
                 }
             }
-            crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+            crate::dfu::DfuCmd::Finish(crate::dfu::DfuTarget::ForwardPeripheral(id)) if id == self.id as u8 => {
                 if self.dfu_aborted {
                     return;
                 }
@@ -221,7 +221,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     }
                 }
             }
-            crate::dfu::DfuCmd::SystemReset(crate::dfu::DfuTarget::Peripheral(id)) if id == self.id as u8 => {
+            crate::dfu::DfuCmd::SystemReset(crate::dfu::DfuTarget::ForwardPeripheral(id)) if id == self.id as u8 => {
                 self.dfu_aborted = false;
                 info!("dfu_split: forwarding system reset to peripheral {}", self.id);
                 if self.send(&SplitMessage::SystemReset).await.is_err() {

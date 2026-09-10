@@ -15,7 +15,7 @@ use embassy_rp::uart::{self, BufferedUart};
 use embassy_rp::usb::InterruptHandler;
 use panic_probe as _;
 use rmk::debounce::default_debouncer::DefaultDebouncer;
-use rmk::dfu::{partitions_from_linkerscript, FlashMutex};
+use rmk::dfu::{partitions_from_linkerscript, FlashDfuHandler, FlashMutex};
 use rmk::futures::future::join;
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::dfu_led::DfuLedProcessor;
@@ -63,9 +63,11 @@ async fn main(_spawner: Spawner) {
 
     let mut watchdog_runner = Rp2040Watchdog::default_runner(embassy_rp::watchdog::Watchdog::new(p.WATCHDOG));
 
+    let mut dfu_handler = FlashDfuHandler::new(dfu_partition, state_partition);
+
     join(
-        run_all!(matrix, dfu_led_processor, watchdog_runner),
-        run_rmk_split_peripheral(uart_instance, dfu_partition, state_partition),
+        run_all!(matrix, dfu_led_processor, watchdog_runner, dfu_handler),
+        run_rmk_split_peripheral(uart_instance),
     )
     .await;
 }

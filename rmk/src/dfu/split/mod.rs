@@ -52,9 +52,11 @@
 //!     │   │                             │ │
 //!     ├── FirmwareChunk{offset,data} ──>│ │
 //!     │   │                             │ │
-//!     │   │               handler.write_chunk()
+//!     │   │               publish_event(Write(Local, offset, data))
+//!     │   │               Runnable → write_chunk()
 //!     │   │               — incremental erase (page-by-page)
 //!     │   │               — write to flash
+//!     │   │               SPLIT_RESPONSE_CHANNEL.signal()
 //!     │   │               chunk_crc = CRC32(chunk) │
 //!     │   │                             │ │
 //!     │   │<─ FirmwareChunkAck{offset,──┤ │
@@ -89,9 +91,11 @@
 //!     │                                   │
 //!     ├── FirmwareUpdateComplete ────────>│
 //!     │                                   │
-//!     │                     handler.compute_dfu_crc()
+//!     │                     publish_event(ComputeCrc)
+//!     │                     Runnable → compute_dfu_crc()
 //!     │                     = CRC32(whole DFU partition)
 //!     │                     via flash readback (256B blocks)
+//!     │                     SPLIT_RESPONSE_CHANNEL.signal(Crc(result))
 //!     │                                   │
 //!     │<── FirmwareCrcReport(dfu_crc) ────┤
 //!     │                                   │
@@ -104,7 +108,8 @@
 //!     │                                   │
 //!     │    ├── FirmwareCrcOk ────────>│   │
 //!     │    │                          │   │
-//!     │    │                handler.mark_updated_and_reset()
+//!     │    │                publish_event(Finish(Local))
+//!     │    │                Runnable → sanity check + mark_updated_and_reset()
 //!     │    │               (only after CrcOk — never into corrupt FW)
 //!     │    │                          │   │
 //!     │    │<─ FirmwareUpdateConfirm ─┤   │

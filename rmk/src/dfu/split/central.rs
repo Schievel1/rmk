@@ -2,7 +2,6 @@ use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::Mutex;
 
-use crate::RawMutex;
 use crate::dfu::MAX_DFU_ALTS;
 
 /// A firmware binary reference and its pre-computed CRC-32.

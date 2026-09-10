@@ -171,6 +171,7 @@ impl crate::KeyboardTomlConfig {
             && let Some(event) = events.iter_mut().find(|e| e.name == "dfu_cmd")
         {
             event.subs += split_peripherals_num;
+            event.pubs += 1; // Split-Loop as second publisher (USB-Proxy is first)
         }
         if !split_battery_peripheral_ids.is_empty()
             && active_features.contains(&"split")

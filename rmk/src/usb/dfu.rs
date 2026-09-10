@@ -72,7 +72,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
 /// Alt 0 is the device's own DFU download (forwarded by [`ProxyUsbDfuHandler`]
 /// with `DfuTarget::Central` to the async updater); alt 1..N are split
 /// peripheral slots (requires `dfu_split`), forwarded with
-/// `DfuTarget::Peripheral(n)`. Routes by the current alternate setting and
+/// `DfuTarget::ForwardPeripheral(n)`. Routes by the current alternate setting and
 /// injects adaptive host-side flow control (`dfuDNBUSY`) while commands are
 /// still in flight.
 struct UsbDfuIface {
@@ -228,7 +228,7 @@ pub(crate) fn register_dfu_iface<D: embassy_usb::driver::Driver<'static>>(
             for id in 0..num_split {
                 slots[id + 1] = Some(DfuState::new(
                     ProxyUsbDfuHandler {
-                        target: crate::dfu::DfuTarget::Peripheral(id as u8),
+                        target: crate::dfu::DfuTarget::ForwardPeripheral(id as u8),
                         written: 0,
                     },
                     DfuAttributes::CAN_DOWNLOAD,
