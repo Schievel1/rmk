@@ -354,7 +354,28 @@ impl<'a> Keyboard<'a> {
         match key.state {
             KeyState::WaitingCombo => {
                 debug!("[Combo] Timeout, dispatch combo");
-                self.dispatch_combos(&key.action, key.event, false).await;
+                // A timeout is not an interrupting key press: only a delayed
+                // combo containing this key may fire.
+                let mut timeout_event = key.event;
+                timeout_event.pressed = false;
+                self.trigger_delayed_combo(&key.action, timeout_event).await;
+
+                if self
+                    .held_buffer
+                    .remove_if(|k| k.event.pos == key.event.pos && k.state == KeyState::WaitingCombo)
+                    .is_none()
+                {
+                    return;
+                }
+                self.keymap.with_combos_mut(|combos| {
+                    combos
+                        .iter_mut()
+                        .filter_map(|combo| combo.as_mut())
+                        .filter(|combo| !combo.is_triggered() && combo.config.contains(&key.action))
+                        .for_each(Combo::reset);
+                });
+                self.process_key_action(&key.action, key.event, false, key.press_time)
+                    .await;
             }
             _ => {
                 debug!("Buffered morse key timeout");
@@ -1004,8 +1025,7 @@ impl<'a> Keyboard<'a> {
     /// - `key_action`: The action of the key that triggered this function
     /// - `event`: The keyboard event. When pressing (interrupting), trigger any delayed combo.
     ///   When releasing, only trigger combos that contain the key_action.
-    /// - `interrupting_press`: Whether this is a new press rather than a buffered press timing out.
-    async fn trigger_delayed_combo(&mut self, key_action: &KeyAction, event: KeyboardEvent, interrupting_press: bool) {
+    async fn trigger_delayed_combo(&mut self, key_action: &KeyAction, event: KeyboardEvent) {
         // First, find the delayed combo and trigger it
         let triggered_combo = self.keymap.with_combos_mut(|combos| {
             combos
@@ -1015,7 +1035,7 @@ impl<'a> Keyboard<'a> {
                     if c.is_all_pressed() && !c.is_triggered() {
                         // When a key is pressed (interrupting a combo wait), trigger any delayed combo.
                         // When releasing a key, only trigger combos that contain the key_action.
-                        if interrupting_press || c.config.contains(key_action) {
+                        if event.pressed || c.config.contains(key_action) {
                             // All keys are pressed but the combo is not triggered, trigger it
                             return Some((c.size(), c));
                         }
@@ -1076,7 +1096,7 @@ impl<'a> Keyboard<'a> {
 
         // First, when releasing a key, check whether there's untriggered combo, if so, triggerer it first
         if !event.pressed {
-            self.trigger_delayed_combo(key_action, event, false).await;
+            self.trigger_delayed_combo(key_action, event).await;
         }
 
         // If this is a re-press of a key belonging to an already-triggered combo
@@ -1202,32 +1222,14 @@ impl<'a> Keyboard<'a> {
             }
 
             // When no key is updated(the combo is interruptted), or a key is released,
-            self.dispatch_combos(key_action, event, true).await;
+            self.dispatch_combos(key_action, event).await;
             (Some(*key_action), false)
         }
     }
 
-    // Dispatch all waiting combo keys after an event interruption, or only the
-    // expired key when called by the deadline path.
-    async fn dispatch_combos(&mut self, key_action: &KeyAction, event: KeyboardEvent, dispatch_all: bool) {
-        self.trigger_delayed_combo(key_action, event, event.pressed && dispatch_all)
-            .await;
-
-        if !dispatch_all {
-            let Some(key) = self.held_buffer.remove_if(|k| k.event.pos == event.pos) else {
-                return;
-            };
-            self.keymap.with_combos_mut(|combos| {
-                combos
-                    .iter_mut()
-                    .filter_map(|combo| combo.as_mut())
-                    .filter(|combo| !combo.is_triggered() && combo.config.contains(key_action))
-                    .for_each(Combo::reset);
-            });
-            self.process_key_action(&key.action, key.event, false, key.press_time)
-                .await;
-            return;
-        }
+    // Dispatch combo keys buffered in the held buffer when the combo isn't being triggered.
+    async fn dispatch_combos(&mut self, key_action: &KeyAction, event: KeyboardEvent) {
+        self.trigger_delayed_combo(key_action, event).await;
 
         // Dispatch every waiting key, earliest press first. Dispatching one key can
         // remove and re-push others, so look the next one up again instead of
