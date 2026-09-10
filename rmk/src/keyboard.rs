@@ -354,7 +354,26 @@ impl<'a> Keyboard<'a> {
         match key.state {
             KeyState::WaitingCombo => {
                 debug!("[Combo] Timeout, dispatch combo");
-                self.dispatch_combos(&key.action, key.event).await;
+                // A timeout is not an interrupting key press: only a delayed
+                // combo containing this key may fire.
+                let mut timeout_event = key.event;
+                timeout_event.pressed = false;
+                self.trigger_delayed_combo(&key.action, timeout_event).await;
+
+                if let Some(key) = self
+                    .held_buffer
+                    .remove_if(|k| k.event.pos == key.event.pos && k.state == KeyState::WaitingCombo)
+                {
+                    self.keymap.with_combos_mut(|combos| {
+                        combos
+                            .iter_mut()
+                            .flatten()
+                            .filter(|combo| !combo.is_triggered() && combo.config.contains(&key.action))
+                            .for_each(Combo::reset);
+                    });
+                    self.process_key_action(&key.action, key.event, false, key.press_time)
+                        .await;
+                }
             }
             _ => {
                 debug!("Buffered morse key timeout");

@@ -59,6 +59,30 @@ steps = [
 ]
 expect = [["LAlt"], [], ["V"], []]
 
+# Timing out one combo attempt must not shorten a later, disjoint attempt's
+# timeout window. V starts first and expires while R still has 40ms left to
+# combine with T.
+[[test]]
+name = "disjoint_combo_timeout_preserves_later_window"
+behavior.combo = {
+  timeout = "100ms",
+  combos = [
+    { actions = ["V", "B"], output = "LShift", layer = 0 },
+    { actions = ["R", "T"], output = "LAlt", layer = 0 },
+  ]
+}
+steps = [
+  { press = [2, 3] },
+  { delay = 50 },
+  { press = [1, 5] },
+  { delay = 60 },
+  { press = [1, 6] },
+  { release = [1, 6] },
+  { release = [1, 5] },
+  { release = [2, 3] },
+]
+expect = [["V"], ["LAlt", "V"], ["V"], []]
+
 [[test]]
 name = "combo_with_mod_then_mod_timeout"
 steps = [
