@@ -356,6 +356,31 @@ mod tests {
     }
 
     #[test]
+    fn split_reserves_sleep_subscribers_for_two_peripherals_without_display() {
+        let mut config: KeyboardTomlConfig = toml::from_str("").unwrap();
+        config.split = Some(SplitConfig {
+            peripheral: vec![SplitBoardConfig::default(), SplitBoardConfig::default()],
+            ..Default::default()
+        });
+        config.auto_calculate_parameters();
+
+        let sleep_subs = |features: &[&str]| {
+            config
+                .build_constants(features)
+                .unwrap()
+                .events
+                .into_iter()
+                .find(|event| event.name == "sleep_state")
+                .unwrap()
+                .subs
+        };
+        let base = sleep_subs(&[]);
+
+        assert_eq!(sleep_subs(&["split"]), base + 2);
+        assert_eq!(sleep_subs(&["split", "_ble"]), base + 4);
+    }
+
+    #[test]
     fn configless_split_has_no_battery_peripheral_ids() {
         let config: KeyboardTomlConfig = toml::from_str("").unwrap();
 
