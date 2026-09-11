@@ -181,7 +181,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         }
                         #[cfg(feature = "dfu_split")]
                         SplitMessage::FirmwareChunk { offset, len, data } => {
-                            let actual_len = len as usize;
+                            let actual_len = (len as usize).min(data.0.len());
                             let chunk_data = &data.0[..actual_len];
                             let mut buf: heapless::Vec<u8, { crate::dfu::BLOCK_SIZE_DFU }> = heapless::Vec::new();
                             if buf.extend_from_slice(chunk_data).is_err() {

@@ -25,8 +25,7 @@ impl_payload_wrapper!(DfuStatusEvent, DfuStatus);
 
 /// DFU command event — published by the USB proxy (ISR context) and consumed
 /// by [`FlashDfuHandler`](crate::dfu::FlashDfuHandler) (central) and
-/// [`PeripheralManager`](crate::split::driver::PeripheralManager) (peripheral
-/// passthrough).
+/// `PeripheralManager` (peripheral passthrough).
 #[event(
     channel_size = crate::DFU_CMD_EVENT_CHANNEL_SIZE,
     pubs = crate::DFU_CMD_EVENT_PUB_SIZE,

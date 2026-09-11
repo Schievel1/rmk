@@ -45,7 +45,7 @@ impl dfu_mode::Handler for ProxyUsbDfuHandler {
         let mut buf: heapless::Vec<u8, { BLOCK_SIZE_DFU }> = heapless::Vec::new();
         buf.extend_from_slice(data).map_err(|_| Status::ErrUnknown)?;
         let offset = self.written;
-        self.written += data.len() as u32;
+        self.written = self.written.checked_add(data.len() as u32).ok_or(Status::ErrAddress)?;
         publish_event(DfuCmdEvent(DfuCmd::Write(self.target, offset, buf)));
         publish_event(DfuStatusEvent::new(DfuStatus::Downloading));
         Ok(())
@@ -82,7 +82,9 @@ struct UsbDfuIface {
 
 impl Handler for UsbDfuIface {
     fn set_alternate_setting(&mut self, _iface: InterfaceNumber, alternate_setting: u8) {
-        self.current_alt = alternate_setting.min(self.handlers.len() as u8 - 1);
+        if (alternate_setting as usize) < self.handlers.len() {
+            self.current_alt = alternate_setting;
+        }
     }
 
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
@@ -118,7 +120,11 @@ impl Handler for UsbDfuIface {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         const DFU_GETSTATUS: u8 = 3;
 
-        if !crate::event::DfuCmdEvent::empty() && req.request == DFU_GETSTATUS {
+        if !crate::event::DfuCmdEvent::empty()
+            && req.request == DFU_GETSTATUS
+            && req.request_type == RequestType::Class
+            && req.recipient == Recipient::Interface
+        {
             // Short-circuit: return dfuDNBUSY directly without
             // advancing the DfuState machine. The state stays in
             // DlSync so the next real GETSTATUS (after the queue
@@ -128,7 +134,7 @@ impl Handler for UsbDfuIface {
             let resp: [u8; 6] = [
                 0x00, // bmAttributes
                 0x0A, 0x00, 0x00, // bwPollTimeout = 10 ms (3 bytes LE)
-                4,    // bState = DlSync
+                4,    // bState = DlBusy
                 0x00, // iString (none)
             ];
             buf[..6].copy_from_slice(&resp);

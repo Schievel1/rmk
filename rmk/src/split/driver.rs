@@ -180,7 +180,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             Err(SplitDriverError::Disconnected) => Err(()),
             Err(e) => {
                 error!("SplitDriver write error: {:?}", e);
-                Ok(())
+                Err(())
             }
         }
     }

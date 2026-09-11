@@ -181,7 +181,9 @@ pub fn partitions_from_linkerscript<'a, F: NorFlash>(
 pub async fn mark_booted<STATE: NorFlash>(state: &mut STATE) {
     let mut aligned = [0u8; 16];
     let mut firmware_state = FirmwareState::new(state, &mut aligned[..STATE::WRITE_SIZE]);
-    firmware_state.mark_booted().await.ok();
+    if firmware_state.mark_booted().await.is_err() {
+        error!("dfu: mark_booted failed — firmware may revert on next reset");
+    }
 }
 
 #[cfg(feature = "dfu_split")]
@@ -205,7 +207,7 @@ pub(crate) enum DfuTarget {
 ///
 /// # Flow targets
 ///
-/// | Variant                         | Publisher                  | Subscriber                  | Meaning                                          |
+/// | Variant                         | Publisher                  | Target Subscriber           | Meaning                                          |
 /// |---------------------------------|----------------------------|-----------------------------|--------------------------------------------------|
 /// | `Start(Central)`                | USB proxy (`usb/dfu.rs`)   | `FlashDfuHandler` Runnable  | Host started DFU download for alt 0 (central)    |
 /// | `Start(ForwardPeripheral(n))`   | USB proxy                  | `PeripheralManager`         | Host started DFU download for alt n (passthrough)|
@@ -324,7 +326,6 @@ pub struct FlashDfuHandler<DFU: NorFlash + Clone, STATE: NorFlash + Clone> {
     state_partition: STATE,
     last_erased_page: Option<u32>,
     written_len: u32,
-    offset: u32,
 }
 
 impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE> {
@@ -336,7 +337,6 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
             state_partition,
             last_erased_page: None,
             written_len: 0,
-            offset: 0,
         }
     }
 
@@ -362,6 +362,16 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
         let mut dfu = self.dfu_partition.clone();
         if data.is_empty() {
             return Ok(());
+        }
+        let write_size = <DFU as NorFlash>::WRITE_SIZE as u32;
+        if offset % write_size != 0 || data.len() as u32 % write_size != 0 {
+            error!(
+                "dfu: unaligned write — offset={}, len={}, write_size={}",
+                offset,
+                data.len(),
+                write_size
+            );
+            return Err(());
         }
         // Calculate which flash pages overlap with [offset .. offset+len)
         // and erase each one exactly once.
@@ -478,11 +488,8 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> Runnable for FlashDfuHandle
             ) {
                 if let DfuCmd::Write(DfuTarget::Local, offset, ref data) = cmd_event.0 {
                     let result = self.write_chunk(offset, data).await;
-                    if result.is_ok() {
-                        self.offset = offset + data.len() as u32;
-                    } else {
+                    if result.is_err() {
                         error!("dfu: firmware write failed at offset {:#010x}", offset);
-                        self.offset = offset + data.len() as u32;
                         DFU_WRITE_FAILED.store(true, Ordering::Release);
                         publish_event(DfuStatusEvent::new(DfuStatus::Error));
                     }
@@ -515,17 +522,15 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
         match cmd {
             DfuCmd::UnlockRequest => {}
             DfuCmd::Start(DfuTarget::Central) | DfuCmd::Start(DfuTarget::Local) => {
-                self.offset = 0;
                 DFU_WRITE_FAILED.store(false, Ordering::Release);
             }
             DfuCmd::Write(DfuTarget::Central, offset, data) => match self.write_chunk(offset, &data).await {
-                Ok(()) => self.offset = offset + data.len() as u32,
                 Err(()) => {
                     error!("dfu: firmware write failed at offset {:#010x}", offset);
-                    self.offset = offset + data.len() as u32;
                     DFU_WRITE_FAILED.store(true, Ordering::Release);
                     publish_event(DfuStatusEvent::new(DfuStatus::Error));
                 }
+                _ => {}
             },
             DfuCmd::Finish(DfuTarget::Central) | DfuCmd::Finish(DfuTarget::Local) => {
                 if DFU_WRITE_FAILED.load(Ordering::Acquire) {
@@ -533,7 +538,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
                     publish_event(DfuStatusEvent::new(DfuStatus::Error));
                     DFU_WRITE_FAILED.store(false, Ordering::Release);
                 } else {
-                    info!("dfu: {} bytes written, verifying...", self.offset);
+                    info!("dfu: {} bytes written, verifying...", self.written_len);
                     if self.check_sanity_from_flash().await.is_err() {
                         DFU_WRITE_FAILED.store(true, Ordering::Release);
                         publish_event(DfuStatusEvent::new(DfuStatus::Error));
@@ -608,7 +613,7 @@ impl<'a> Runnable for DfuLock<'a> {
         let mut dfu_cmd_sub = DfuCmdEvent::subscriber();
 
         loop {
-            // 1. Warte auf UnlockRequest
+            // 1. Wait for UnlockRequest
             match dfu_cmd_sub.next_message_pure().await {
                 DfuCmdEvent(DfuCmd::UnlockRequest) => {}
                 _ => continue,
@@ -618,7 +623,7 @@ impl<'a> Runnable for DfuLock<'a> {
             info!("dfu_lock: waiting for unlock keys");
             publish_event(DfuStatusEvent::new(DfuStatus::LockWaiting));
 
-            // 2. Unlock-Key-Polling (10 s)
+            // 2. Unlock key polling (10 s)
             let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
             let mut unlocked = false;
             loop {
@@ -644,7 +649,7 @@ impl<'a> Runnable for DfuLock<'a> {
                 continue;
             }
 
-            // 3. Warte auf Start oder Timeout (10 s)
+            // 3. Wait for Start or timeout (10 s)
             info!("dfu_lock: unlocked, waiting for DFU download");
             let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(10);
             match select(dfu_cmd_sub.next_message_pure(), embassy_time::Timer::at(deadline)).await {
@@ -659,7 +664,7 @@ impl<'a> Runnable for DfuLock<'a> {
                 }
             }
 
-            // 4. Activity-basiertes Warten auf Finish
+            // 4. Activity-based wait for Finish
             let mut write_deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(30);
             loop {
                 match select(dfu_cmd_sub.next_message_pure(), embassy_time::Timer::at(write_deadline)).await {

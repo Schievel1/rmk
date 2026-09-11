@@ -99,7 +99,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             return;
                         }
 
-                        let deadline = Instant::now() + Duration::from_secs(2);
+                        let deadline = Instant::now() + Duration::from_secs(5);
                         let got = loop {
                             match select(self.transceiver.read(), Timer::at(deadline)).await {
                                 Either::First(Ok(SplitMessage::FirmwareChunkAck {
@@ -177,6 +177,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
 
                 let Some(peripheral_crc) = crc else {
                     error!("dfu_split: CRC verification failed");
+                    self.passthrough_crc = crate::crc32::Crc32::new();
                     self.send(&SplitMessage::FirmwareCrcFail).await.ok();
                     publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                     return;
@@ -215,7 +216,8 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                             break;
                         }
                         Either::Second(_) => {
-                            info!("dfu_split: FirmwareUpdateConfirm timeout on confirm");
+                            error!("dfu_split: FirmwareUpdateConfirm timeout on confirm");
+                            publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                             break;
                         }
                     }
@@ -404,6 +406,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             let local_crc = central_crc.finalize();
             if local_crc != expected_hash {
                 error!("dfu_split: central CRC mismatch — aborting");
+                publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                 return;
             }
 
@@ -446,6 +449,7 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                         }
                         Either::Second(_) => {
                             error!("dfu_split: FirmwareCrcOk timeout");
+                            publish_event(crate::event::DfuStatusEvent::new(rmk_types::dfu::DfuStatus::Error));
                             return;
                         }
                     }

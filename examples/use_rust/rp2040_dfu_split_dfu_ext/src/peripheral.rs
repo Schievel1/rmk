@@ -10,9 +10,8 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
 use embassy_rp::gpio::{Input, Level, Output};
-use embassy_rp::peripherals::{UART0, USB};
+use embassy_rp::peripherals::UART0;
 use embassy_rp::uart::{self, BufferedUart};
-use embassy_rp::usb::InterruptHandler;
 use panic_probe as _;
 use rmk::debounce::default_debouncer::DefaultDebouncer;
 use rmk::dfu::{partitions_from_linkerscript, FlashDfuHandler, FlashMutex};
@@ -26,7 +25,6 @@ use rmk::watchdog::Rp2040Watchdog;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
-    USBCTRL_IRQ => InterruptHandler<USB>;
     UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
 });
 

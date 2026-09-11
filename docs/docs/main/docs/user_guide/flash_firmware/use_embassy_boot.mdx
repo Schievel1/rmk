@@ -253,7 +253,7 @@ This will download the firmware binary onto the DFU partition of the flash and s
 
 `dfu-util` will automatically detect the board — the RMK firmware exposes a DFU USB interface at runtime. No need to press BOOTSEL or trigger a special mode. (With the optional `dfu_lock` feature, DFU downloads require a physical key press to unlock — see below.)
 
-#### Unlocking DFU (optional, dfu_lock)
+#### Unlocking DFU (optional, `dfu_lock`)
 
 If your RMK was compiled with the `dfu_lock` feature, DFU starts in a **locked** state. To unlock:
 
@@ -288,7 +288,7 @@ Additionally the rmk-boot bootloader has blinking codes using PIN_25 (RP2040) / 
 
 ---
 
-## Split peripheral updates (dfu_split)
+## Split peripheral updates (`dfu_split`)
 
 When using a split keyboard with separate microcontrollers for each half,
 `dfu_split` lets you update the peripheral's firmware without a debug
@@ -309,7 +309,7 @@ This feature currently only works for split keyboards that use UART (serial) as 
 rmk = { features = [ "dfu_rp", "split", "dfu_split"] }
 ```
 
-`dfu_split` requires `dfu` (implied by `dfu_rp` / `dfu_nrf`) and `split`.
+`dfu_split` requires `_dfu` (implied by `dfu_rp` / `dfu_nrf`) and `split`.
 
 ### Peripherals count
 
@@ -341,11 +341,11 @@ own DFU flash partition, verifies the CRC, and resets into the new image.
 ### Embedded firmware path
 
 In order to embed the peripheral's firmware into the central's firmware, we need to tell the central during compilation where the binary of the peripheral is.
-Note that this must be a .bin-file. You can create one using `cargo make bin`, see also the Makefile.toml in the examples.
+Note that this must be a .bin-file. You can create one using `cargo make bin`, see also the `Makefile.toml` in the examples.
 
 ::: tip
 
-Use `dfu_lock` (see above) to lock the central against malicious flashing. `dfu_lock` will lock using the central as relay to flash a peripheral as well.
+Use [`dfu_lock`](#unlocking-dfu-optional-dfu_lock) to lock the central against malicious flashing. `dfu_lock` will lock using the central as relay to flash a peripheral as well.
 
 :::
 
@@ -406,7 +406,7 @@ Likewise the peripheral will tell the central its firmware checksum proactively 
 ### Passthrough path
 
 The passthrough pass works identically to the normal DFU flash (see above) — just select a
-different alternate setting (`-a`). Up to four peripherals are supported.
+different alternate setting (`-a`).
 
 ```shell
 # Flash peripheral 0
@@ -445,28 +445,34 @@ If you are using the Rust API on the peripheral, place the `memory.x` from rmk-b
 ```rust
 // All partition offsets come from the DFU symbols in memory.x
 use core::cell::RefCell;
-use rmk::dfu::{FlashMutex, partitions_from_linkerscript};
+use rmk::dfu::{partitions_from_linkerscript, FlashDfuHandler, FlashMutex};
 
 // The peripheral has no storage partition, so it is discarded.
 let flash_mutex = FlashMutex::new(RefCell::new(Flash::new_blocking(p.FLASH)));
 let (_, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
+let mut dfu_handler = FlashDfuHandler::new(dfu_partition, state_partition);
 // optional DFU LED for the peripheral
 let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_25, Level::Low), false);
 
+// run the FlashDfuHandler in run_all
 // if used, run the processor of the DFU LED in run_all:
 join(
-    run_all!(matrix, dfu_led_processor, watchdog_runner),
-    run_rmk_split_peripheral(uart_instance, dfu_partition, state_partition),
+    run_all!(matrix, dfu_led_processor, watchdog_runner, dfu_handler),
+    run_rmk_split_peripheral(uart_instance),
 )
 .await;
 ```
 
 `mark_booted()` is called automatically inside `run_rmk_split_peripheral()`. The bootloader reverts the update if the firmware crashes before this happens.
 
+::: tip
+This setup also enables DFU updates via USB for the peripheral, if a USB connection is set up for it. 
+:::
+
 ### Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Peripheral flashes 3 times after update | Firmware crashed before `mark_booted()` was called automatically. Build with the `dfu_rp`/`dfu_nrf` feature (using config) or ensure `FlashDfuHandler` is used (using Rust). |
+| Peripheral DFU LED flashes 3 times after update | Firmware crashed before `mark_booted()` was called automatically. Build with the `dfu_rp`/`dfu_nrf` feature (using config) or ensure `FlashDfuHandler` is used (using Rust). |
 | `dfu-util -a 1` shows `dfuERROR` or hangs at 0% | Peripheral not connected or its firmware is built without the `dfu_split` feature. |
