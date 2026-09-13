@@ -53,9 +53,6 @@ fn main() {
 
     // Set the linker script of the defmt
     println!("cargo:rustc-link-arg=-Tdefmt.x");
-
-    // Set the linker script for the RP2040W
-    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
 }
 
 fn generate_vial_config() {

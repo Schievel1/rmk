@@ -28,6 +28,7 @@ use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
 use rmk::matrix::Matrix;
+use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::processor::builtin::wpm::WpmProcessor;
 use rmk::split::PeripheralMatrixConfig;
 use rmk::usb::UsbTransport;
@@ -105,7 +106,7 @@ async fn main(spawner: Spawner) {
 
     // Pin config
     let (row_pins, col_pins) =
-        config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7, PIN_8, PIN_9], output: [PIN_19, PIN_20, PIN_21]);
+        config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7, PIN_8, PIN_9], output: [PIN_19, PIN_22, PIN_21]);
 
     // Use internal flash to emulate eeprom
     // DFU requires blocking flash + async_flash_wrapper
@@ -115,6 +116,9 @@ async fn main(spawner: Spawner) {
         FLASH_SIZE,
     >::new_blocking(p.FLASH)));
     let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
+
+    // DFU LED processor, optional. Flashes the LED when DFU is active
+    let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_20, Level::Low), false);
 
     let keyboard_device_config = DeviceConfig {
         vid: 0x4c4c,
@@ -134,6 +138,13 @@ async fn main(spawner: Spawner) {
 
     let rmk_config = RmkConfig {
         device_config: keyboard_device_config,
+        lock_config: rmk::config::LockConfig {
+            // Development only: skips the unlock-key challenge so rynk-wtf can
+            // DFU-flash without holding keys. Set to false for daily use —
+            // anyone in BLE range could otherwise reflash the keyboard.
+            insecure: true,
+            ..Default::default()
+        },
         storage_config,
         ..Default::default()
     };
@@ -186,6 +197,7 @@ async fn main(spawner: Spawner) {
         wpm_processor,
         keyboard,
         watchdog_runner,
+        dfu_led_processor,
         dfu_handler
     )
     .await;

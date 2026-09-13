@@ -548,6 +548,11 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
                         publish_event(DfuStatusEvent::new(DfuStatus::Error));
                     } else {
                         info!("dfu: looks good, restarting");
+                        // Let the finish response flush out before resetting:
+                        // on BLE the notification is still queued in the
+                        // controller here, and a reset would drop it, leaving
+                        // the host hanging on the reply.
+                        embassy_time::Timer::after_millis(500).await;
                         match self.mark_updated_and_reset().await {
                             Ok(()) => info!("dfu: update complete, resetting"),
                             Err(()) => {

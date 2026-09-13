@@ -4,6 +4,34 @@ install_crate = { rustup_component_name = "llvm-tools" }
 [tasks.flip-link]
 install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = ["-h"] }
 
+[tasks.build]
+command = "cargo"
+args = ["build", "--release"]
+dependencies = ["install-llvm-tools", "flip-link"]
+
+[tasks.build-peripheral]
+command = "cargo"
+args = ["build", "--bin", "peripheral", "--release"]
+dependencies = ["install-llvm-tools", "flip-link"]
+
+[tasks.bin-peripheral]
+command = "cargo"
+args = ["objcopy", "--release", "--bin", "peripheral", "--", "-O", "binary", "rmk-pi-pico-w-split-dfu-ble-peripheral.bin"]
+dependencies = ["build-peripheral"]
+
+[tasks.build-central]
+command = "cargo"
+args = ["build", "--bin", "central", "--release"]
+dependencies = ["install-llvm-tools", "flip-link"]
+
+[tasks.bin-central]
+command = "cargo"
+args = ["objcopy", "--release", "--bin", "central", "--", "-O", "binary", "rmk-pi-pico-w-split-dfu-ble-central.bin"]
+dependencies = ["build-central"]
+
+[tasks.bin]
+dependencies = ["bin-central", "bin-peripheral"]
+
 [tasks.objcopy-central]
 install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
     "objcopy",

@@ -7,7 +7,7 @@ mod macros;
 use defmt::{info, unwrap};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{Input, Output};
+use embassy_nrf::gpio::{Input, Level, Output, OutputDrive};
 use embassy_nrf::interrupt::{self, InterruptExt};
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::{RNG, SAADC, USBD};
@@ -25,6 +25,7 @@ use rmk::input_device::adc::{AnalogEventType, NrfAdc};
 use rmk::input_device::battery::BatteryProcessor;
 use rmk::input_device::rotary_encoder::RotaryEncoder;
 use rmk::matrix::Matrix;
+use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::run_all;
 use rmk::split::peripheral::run_rmk_split_peripheral;
 use rmk::storage::new_storage_without_keymap;
@@ -170,9 +171,20 @@ async fn main(spawner: Spawner) {
 
     let mut dfu_handler = FlashDfuHandler::new(dfu_partition, state_partition);
 
+    // DFU activity LED (on during download, flickers per block)
+    let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.P0_15, Level::Low, OutputDrive::Standard), false);
+
     // Start
     join3(
-        run_all!(matrix, encoder, adc_device, storage, watchdog_runner, dfu_handler),
+        run_all!(
+            matrix,
+            encoder,
+            adc_device,
+            storage,
+            watchdog_runner,
+            dfu_handler,
+            dfu_led_processor
+        ),
         run_all!(battery_processor),
         run_rmk_split_peripheral(0, sdc, ble_addr(), Some("RMK Keyboard per0")),
     )
