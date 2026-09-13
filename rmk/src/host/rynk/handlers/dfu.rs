@@ -155,8 +155,7 @@ pub(crate) static DFU_RYNK_STATE: Mutex<CriticalSectionRawMutex, DfuRynkState> =
 pub(crate) struct ProxyRynkDfuHandler;
 
 /// Start a DFU download session. Resets CRC state, publishes
-/// [`DfuCmd::Start(Central)`](DfuTarget::Central), signals low-latency
-/// BLE connection parameters, and emits `DfuStatus::Started`.
+/// [`DfuCmd::Start(Central)`](DfuTarget::Central), and emits `DfuStatus::Started`.
 impl Handle<DfuStart> for ProxyRynkDfuHandler {
     async fn handle(&self, _: ()) -> Result<(), RynkError> {
         {
@@ -165,7 +164,6 @@ impl Handle<DfuStart> for ProxyRynkDfuHandler {
         }
         publish_event(DfuCmdEvent(DfuCmd::Start(DfuTarget::Central)));
         publish_event(DfuStatusEvent::new(DfuStatus::Started));
-        crate::channel::DFU_LOW_LATENCY_SIGNAL.signal(());
         info!("dfu_rynk: DFU download started");
         Ok(())
     }
