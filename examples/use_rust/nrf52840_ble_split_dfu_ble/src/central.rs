@@ -182,6 +182,8 @@ async fn main(spawner: Spawner) {
     let rmk_config = RmkConfig {
         device_config: keyboard_device_config,
         lock_config: rmk::config::LockConfig {
+            // Development only: skips the unlock-key challenge so rynk-wtf can
+            // DFU-flash without holding keys. Set to false for daily use.
             insecure: true,
             ..Default::default()
         },

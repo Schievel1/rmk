@@ -21,6 +21,7 @@ use rmk::debounce::default_debouncer::DefaultDebouncer;
 use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::futures::future::join;
 use rmk::matrix::Matrix;
+use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::run_all;
 use rmk::split::peripheral::run_rmk_split_peripheral;
 use rmk::storage::new_storage_without_keymap;
@@ -97,6 +98,8 @@ async fn main(spawner: Spawner) {
         FLASH_SIZE,
     >::new_blocking(p.FLASH)));
     let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
+    // DFU LED processor, optional. Flashes the LED when DFU is active
+    let mut dfu_led_processor = DfuLedProcessor::new(Output::new(p.PIN_20, Level::Low), false);
     let storage_config = StorageConfig {
         start_addr: 0, // Uses storage partition from linker script
         num_sectors: 8,
@@ -105,7 +108,7 @@ async fn main(spawner: Spawner) {
     let mut storage = new_storage_without_keymap(storage_partition, storage_config).await;
 
     // Pin config
-    let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7], output: [PIN_19, PIN_20]);
+    let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_6, PIN_7], output: [PIN_19, PIN_21]);
     let debouncer = DefaultDebouncer::new();
     let mut matrix = Matrix::<_, _, _, 2, 2, true>::new(row_pins, col_pins, debouncer);
 
@@ -117,8 +120,8 @@ async fn main(spawner: Spawner) {
 
     // Start
     join(
-        run_all!(matrix, storage, watchdog_runner, dfu_handler),
-        run_rmk_split_peripheral(0, controller, ble_addr, None),
+        run_all!(matrix, storage, watchdog_runner, dfu_led_processor, dfu_handler),
+        run_rmk_split_peripheral(0, controller, ble_addr, Some("RMK PicoW Split per0")),
     )
     .await;
 }
