@@ -49,6 +49,8 @@ compile_error!(
 compile_error!("feature `_dfu` requires `dfu_rp` or `dfu_nrf`");
 #[cfg(all(feature = "dfu_split", not(feature = "_dfu")))]
 compile_error!("feature `dfu_split` requires the `_dfu` feature — enable `dfu_rp` or `dfu_nrf`");
+#[cfg(all(feature = "dfu_ext", not(feature = "_dfu")))]
+compile_error!("feature `dfu_ext` requires the `_dfu` feature — enable `dfu_rp` or `dfu_nrf`");
 #[cfg(all(feature = "dfu_lock", not(feature = "_dfu")))]
 compile_error!("feature `dfu_lock` requires the `_dfu` feature — enable `dfu_rp` or `dfu_nrf`");
 

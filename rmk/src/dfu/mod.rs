@@ -150,6 +150,9 @@ pub type FlashMutex<F> = embassy_sync::mutex::Mutex<crate::RawMutex, F>;
 /// `storage` is async — pass it straight to the keymap/storage layer.
 /// `state` feeds [`mark_booted`]; `dfu` and `state` go into
 /// [`FlashDfuHandler::new`].
+///
+/// When the DFU download partition lives on an external flash (`dfu_ext`),
+/// discard the returned `dfu` partition and build the external one yourself.
 pub fn partitions_from_linkerscript<'a, F: NorFlash>(
     flash_mutex: &'a FlashMutex<F>,
 ) -> (

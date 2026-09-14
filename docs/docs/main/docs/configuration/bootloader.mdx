@@ -192,6 +192,177 @@ See the [DFU lock section](../user_guide/flash_firmware/use_embassy_boot.mdx#unl
 Choose keys that are easy to press simultaneously but not commonly pressed together accidentally.
 :::
 
+## External Flash DFU (optional, feature `dfu_ext`)
+
+When your firmware grows too large for the internal DFU/ACTIVE partition split, you can move the DFU download slot to an external SPI NOR flash chip. With `dfu_ext` active, the internal DFU partition is removed entirely — the ACTIVE region expands to fill the freed space, giving you roughly **double the space for your firmware**. The DFU image is written to and read from the external chip.
+
+**Requirements:**
+
+- A 25-series SPI NOR flash chip with JEDEC‑standard commands (Winbond W25Q64JV, Macronix MX25R, ISSI IS25LP, etc.)
+- A matching `dfu_ext` build of **rmk-boot** for your chip
+- The `dfu_ext` Cargo feature in your RMK firmware
+
+### Partition layout with `dfu_ext`
+
+All internal flash regions stay at fixed offsets. The DFU download slot moves entirely to the external chip.
+
+| Region          | Internal flash offset | External flash offset |
+|-----------------|-----------------------|-----------------------|
+| Bootloader      | `0x0000000`           | —                     |
+| Boot state      | `0x6000`              | —                     |
+| Active firmware | `0x7000`              | —                     |
+| DFU download    | —                     | `0x000000`            |
+| Storage         | follows active        | —                      |
+
+The active size is `flash_size - bootloader - state - storage` (no DFU partition is carved out of the internal flash).
+
+::: warning Custom bootloader: 64K alignment
+If you build your own bootloader, the **ACTIVE partition** and the **external DFU partition** must each be a multiple of 64 KB when using the built-in W25Q driver. The erase size is set to 64 KB to make the swap faster, so partitions that are not 64K-aligned will fail to swap correctly.
+
+The default rmk-boot build already aligns ACTIVE this way — its `build.rs` rounds the ACTIVE size down to a 64 KB multiple (960 KB on a 1 MB nRF52840, 448 KB on a 512 KB nRF52833).
+:::
+
+### Default SPI pins
+
+The bootloader hard‑codes default SPI pins. Match them in your `keyboard.toml` (or change the bootloader source for a custom board):
+
+| Platform | SPI instance | SCK    | MOSI   | MISO   | CS     |
+|----------|-------------|--------|--------|--------|--------|
+| RP2040   | SPI0        | PIN_18 | PIN_19 | PIN_16 | PIN_17 |
+| nRF52840 / nRF52833 | TWISPI0     | P0_17  | P0_22  | P0_20  | P0_24  |
+
+::: warning
+The SPI pins in `keyboard.toml` and in the bootloader source **must agree**. If you change the wiring, update both places.
+:::
+
+### Configuration
+
+import { Tab, Tabs, Rust, Toml } from '@theme'
+
+<Tabs>
+<Tab label={<Toml />}>
+
+```toml title="keyboard.toml"
+[dfu.external_flash]
+# Flash chip driver: "w25q" (built-in) or "custom"
+driver = "w25q"
+# Total flash size in bytes (8 MB = 8388608)
+flash_size = 8388608
+
+[dfu.external_flash.spi]
+instance = "SPI0"
+sck = "PIN_18"
+mosi = "PIN_19"
+miso = "PIN_16"
+cs = "PIN_17"
+tx_dma = "DMA_CH3"   # required for async SPI on RP2040
+rx_dma = "DMA_CH4"   # required for async SPI on RP2040
+```
+
+Enable the feature in `Cargo.toml`:
+
+```toml title="Cargo.toml"
+[dependencies.rmk]
+features = ["rp2040", "dfu_rp", "dfu_ext"]
+```
+
+::: tip Split keyboards: per-side DFU config
+On a split keyboard, each side can have its own `[dfu]` section — `[split.central.dfu]` / `[split.peripheral.dfu]` — which **completely replaces** the global `[dfu]` for that side. This lets the central use an external flash DFU partition while the peripheral keeps an internal one (and vice versa), or use different SPI pins per side.
+
+This requires **two different bootloader builds and two different `memory.x` files** — one per side: flash the central with a `dfu_ext` bootloader build and the peripheral with a regular one, and give each binary its matching linker script. The `build.rs` of the `rp2040_dfu_split_dfu_ext` examples (`use_config` and `use_rust`) shows how to select the right `memory.x` per binary (`memory-central.x` / `memory-peripheral.x`). See [Split keyboard DFU configuration](./split_keyboard.md#split-keyboard-dfu-configuration).
+:::
+
+</Tab>
+<Tab label={<Rust />}>
+
+```rust title="main.rs"
+use core::cell::RefCell;
+use embassy_embedded_hal::flash::partition::BlockingPartition;
+use embassy_rp::flash::Flash;
+use embassy_rp::gpio::Output;
+use embassy_rp::spi::{self, Spi};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use rmk::dfu::{FlashMutex, FlashDfuHandler, partitions_from_linkerscript};
+use rmk::driver::w25q::W25qNorFlash;
+
+// External DFU flash via SPI
+type ExternalFlash = W25qNorFlash<spi::Spi<'static, peripherals::SPI0, spi::Blocking>, Output<'static>>;
+type ExternalPartition<'a> = BlockingPartition<'a, CriticalSectionRawMutex, ExternalFlash>;
+
+let spi = Spi::new_blocking(p.SPI0, p.PIN_18, p.PIN_19, p.PIN_16, Config::default());
+let cs = Output::new(p.PIN_17, Level::High);
+let ext_flash = ExternalFlash::new(spi, cs, 8_388_608);
+
+let dfu_mutex = Mutex::new(RefCell::new(ext_flash));
+// The whole external chip (offset 0) is the DFU download partition.
+let dfu_partition = ExternalPartition::new(&dfu_mutex, 0, 2 * 1024 * 1024);
+
+// Internal flash provides the boot state and storage partitions — the
+// internal DFU partition from the linkerscript layout is discarded.
+let flash_mutex = FlashMutex::new(RefCell::new(Flash::new_blocking(p.FLASH)));
+let (storage_partition, state_partition, _) = partitions_from_linkerscript(&flash_mutex);
+
+let mut dfu_iface = rmk::dfu::FlashDfuHandler::new(dfu_partition, state_partition);
+let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config);
+
+run_all!(
+	// other processors ...
+	usb_transport,
+	dfu_iface,
+)
+```
+
+See `examples/use_rust/nrf52840_dfu_ext` for a complete working example.
+
+</Tab>
+</Tabs>
+
+### `driver = "custom"`
+
+If you use a different flash chip or want to provide your own driver, set `driver = "custom"` and point `init_fn` to a function in your crate:
+
+```toml title="keyboard.toml"
+[dfu.external_flash]
+driver = "custom"
+init_fn = "crate::my_flash::init"
+flash_size = 8388608
+
+[dfu.external_flash.spi]
+instance = "SPI0"
+sck = "PIN_18"
+mosi = "PIN_19"
+miso = "PIN_16"
+cs = "PIN_17"
+tx_dma = "DMA_CH3"   # required for async SPI on RP2040
+rx_dma = "DMA_CH4"   # required for async SPI on RP2040
+```
+
+The function must have the signature:
+
+```rust
+fn init(spi: impl SpiBus, cs: impl OutputPin, flash_size: u32) -> impl NorFlash
+```
+
+RMK only requires `NorFlash` from your driver — the DFU download partition and its erase/size handling are built on top by RMK, so you don't need to slice the chip yourself.
+
+### Building the bootloader
+
+Build `rmk-boot` with the `dfu_ext` feature and your board's flash size:
+
+```shell
+# RP2040 4 MB
+cargo build --release --target thumbv6m-none-eabi --features rp2040-4mb,dfu_ext
+
+# nRF52840
+cargo build --release --target thumbv7em-none-eabihf --features nrf52840,dfu_ext
+
+# nRF52833
+cargo build --release --target thumbv7em-none-eabihf --features nrf52833,dfu_ext
+```
+
+If you need different SPI pins, edit `src/rp2040.rs` or `src/nrf52840.rs` of `rmk-boot` and change the pin assignments before building. The `EXT_FLASH_SIZE` constant (default 8 MB) lives in `src/main.rs`.
+
 ## No-swap bootloader (rmk-boot `noswap`)
 
 If your firmware no longer fits into the ACTIVE partition but you don't need USB DFU updates, build rmk-boot with the `noswap` feature. It removes the DFU download partition entirely and grows ACTIVE to fill the whole remaining flash:
@@ -222,3 +393,7 @@ Also activate the `set-vtor` feature of `cortex-m-rt` in your projects Cargo.tom
 ```toml
 cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
 ```
+
+::: note
+`noswap` is mutually exclusive with [`dfu_ext`](#external-flash-dfu-optional-feature-dfu_ext).
+:::

@@ -683,6 +683,41 @@ pub struct DfuTomlConfig {
     pub led: Option<String>,
     /// Unlock keys for DFU lock (optional)
     pub unlock_keys: Option<Vec<[u8; 2]>>,
+    /// External SPI flash configuration for DFU (optional).
+    /// When set, firmware is written to external flash instead of the
+    /// internal DFU partition.
+    pub external_flash: Option<ExternalFlashTomlConfig>,
+}
+
+/// Driver for an external SPI NOR flash chip used as DFU partition.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalFlashDriver {
+    /// Built-in W25Q driver (JEDEC-standard commands).
+    #[default]
+    W25q,
+    /// User-provided driver, initialized via `init_fn`.
+    Custom,
+}
+
+/// TOML configuration for external SPI flash used as DFU partition.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalFlashTomlConfig {
+    /// Flash chip driver. Supports `"w25q"` (built-in) or `"custom"`.
+    pub driver: ExternalFlashDriver,
+    /// Total flash size in bytes (e.g. 8388608 for 8 MB).
+    pub flash_size: u32,
+    /// Size of the DFU download partition in bytes when it is smaller than the
+    /// whole flash chip (e.g. `2097152` for a 2 MB partition on an 8 MB chip).
+    /// Defaults to the full [`flash_size`](Self::flash_size) when unset.
+    pub dfu_partition_size: Option<u32>,
+    /// Path to a user-defined init function.
+    /// Required when `driver = "custom"`. The function must have signature:
+    /// `fn init(spi: impl SpiBus, cs: impl OutputPin, flash_size: u32) -> impl NorFlash`.
+    pub init_fn: Option<String>,
+    /// SPI bus configuration.
+    pub spi: SpiConfig,
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]

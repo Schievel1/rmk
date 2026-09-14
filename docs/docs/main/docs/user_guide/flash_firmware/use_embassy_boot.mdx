@@ -70,6 +70,10 @@ __bootloader_storage_end   = 0x200000; /* storage partition end */
 
 Make sure `FLASH : ORIGIN` in your `MEMORY` block starts at your ACTIVE partition. RMK's `partitions_from_linkerscript()` picks up the symbols at runtime. All symbols must use **flash-relative offsets** (byte offsets from the start of the flash chip, not absolute XIP addresses). For RP2040, subtract the flash base (`0x10000000`). For nRF52, flash-relative and absolute offsets are the same (flash starts at `0x00000000`).
 
+::: tip External Flash DFU
+If your firmware is too large for the internal DFU/ACTIVE partition split, you can offload the DFU download slot to an external SPI NOR flash chip. This frees the internal DFU space and roughly doubles the ACTIVE region. See [External Flash DFU](../configuration/bootloader.mdx#external-flash-dfu-optional-feature-dfu_ext) for setup instructions.
+:::
+
 ::: tip No DFU updates needed?
 If your firmware doesn't fit into the ACTIVE partition and you don't need USB DFU updates, use an rmk-boot `noswap` build — it grows ACTIVE to the full flash. See [No-swap bootloader](../configuration/bootloader.mdx#no-swap-bootloader-rmk-boot-noswap).
 :::
@@ -433,7 +437,8 @@ written to flash — `mark_booted()` is called automatically. With `#[rmk_periph
 present in `keyboard.toml`. On a split keyboard the peripheral can use its
 own `[split.peripheral.dfu]` section instead — it fully replaces the global
 `[dfu]` for that side, so the peripheral's DFU partition can differ from the
-central's.
+central's (e.g. internal DFU on the peripheral, external flash on the central).
+See [Split keyboard DFU configuration](../../configuration/split_keyboard.md#split-keyboard-dfu-configuration).
 
 If you are using the Rust API on the peripheral, place the `memory.x` from rmk-boot next to `Cargo.toml` (same as the central) and call:
 

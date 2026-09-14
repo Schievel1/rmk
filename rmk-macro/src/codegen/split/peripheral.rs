@@ -135,9 +135,28 @@ fn expand_bind_interrupt_for_split_peripheral(
     hardware: &Hardware,
     peripheral_id: usize,
     rmk_features: &Option<Vec<String>>,
-    _dfu: Option<&DfuConfig>,
+    dfu: Option<&DfuConfig>,
 ) -> TokenStream2 {
     let communication = &hardware.communication;
+
+    // External DFU flash SPI interrupt for nRF52 — the peripheral's DFU
+    // config can differ from the central's, so this uses the per-side one.
+    let ext_flash_spi_interrupt = {
+        let ext_flash = dfu.and_then(|d| d.external_flash.as_ref());
+        if let Some(ext_flash) = ext_flash {
+            match chip.series {
+                ChipSeries::Nrf52 => {
+                    let instance = format_ident!("{}", ext_flash.spi.instance);
+                    quote! {
+                        #instance => ::embassy_nrf::spim::InterruptHandler<::embassy_nrf::peripherals::#instance>;
+                    }
+                }
+                _ => quote! {},
+            }
+        } else {
+            quote! {}
+        }
+    };
 
     let display_interrupt = match &hardware.board {
         BoardConfig::Split(split_config) => {
@@ -254,6 +273,7 @@ fn expand_bind_interrupt_for_split_peripheral(
                     TIMER0 => ::nrf_sdc::mpsl::HighPrioInterruptHandler;
                     RTC0 => ::nrf_sdc::mpsl::HighPrioInterruptHandler;
                     #pmw33xx_spi_interrupts
+                    #ext_flash_spi_interrupt
                     #iqs5xx_interrupt
                     #display_interrupt
                 });
@@ -314,10 +334,28 @@ fn expand_bind_interrupt_for_split_peripheral(
                     }
                 }
             } else if !display_interrupt.is_empty() || !iqs5xx_interrupt.is_empty() || dfu_enabled {
+                // DFU external SPI flash DMA channels
+                let dfu_dma_channels = dfu
+                    .and_then(|d| d.external_flash.as_ref())
+                    .map(|ext| {
+                        let tx = format_ident!(
+                            "{}",
+                            ext.spi.tx_dma.as_ref().expect("dfu.external_flash.spi.tx_dma is required for RP2040")
+                        );
+                        let rx = format_ident!(
+                            "{}",
+                            ext.spi.rx_dma.as_ref().expect("dfu.external_flash.spi.rx_dma is required for RP2040")
+                        );
+                        quote! {
+                            DMA_IRQ_0 => ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#tx>, ::embassy_rp::dma::InterruptHandler<::embassy_rp::peripherals::#rx>;
+                        }
+                    })
+                    .unwrap_or_default();
                 quote! {
                     use ::embassy_rp::bind_interrupts;
                     bind_interrupts!(struct Irqs {
                         #usb_int
+                        #dfu_dma_channels
                         #iqs5xx_interrupt
                         #display_interrupt
                     });

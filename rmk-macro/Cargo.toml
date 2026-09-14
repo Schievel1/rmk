@@ -35,6 +35,8 @@ _dfu = []
 dfu_rp = ["_dfu"]
 dfu_nrf = ["_dfu"]
 dfu_split = []
+dfu_ext = []
+
 [lib]
 proc-macro = true
 doctest = false
