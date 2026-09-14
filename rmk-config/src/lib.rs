@@ -519,6 +519,7 @@ define_event_config!(
     dongle_state,
     // DFU events
     dfu_status,
+    dfu_cmd,
     // Action events
     action,
 );
@@ -673,12 +674,10 @@ pub(crate) struct StorageConfig {
 /// Config for DFU (embassy-boot).
 ///
 /// Offsets come from `rmk-memory.x` linker symbols. This section only
-/// configures DFU behaviour (LED, unlock keys, page size).
+/// configures DFU behaviour (LED, unlock keys).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DfuTomlConfig {
-    /// Flash page size in bytes (e.g. 4096 for RP2040).
-    pub page_size: Option<u32>,
+pub struct DfuTomlConfig {
     /// Optional DFU activity LED pin, e.g. `"PIN_16"`. When set, the LED
     /// is lit while a DFU download is in progress.
     pub led: Option<String>,
@@ -1013,6 +1012,19 @@ pub struct SplitConfig {
     pub peripheral: Vec<SplitBoardConfig>,
 }
 
+/// DFU update policy for split peripherals.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePolicy {
+    /// Only flash when the firmware hash differs (default).
+    #[default]
+    #[serde(alias = "MatchHash")]
+    MatchHash,
+    /// Always flash, regardless of the current firmware.
+    #[serde(alias = "force")]
+    Force,
+}
+
 /// Configurations for each split board
 ///
 /// The transport field must match `split.connection`: `serial` is required for
@@ -1049,14 +1061,22 @@ pub struct SplitBoardConfig {
     pub adc_divider_total: Option<u32>,
     /// Output Pin config for the split
     pub output: Option<Vec<OutputConfig>>,
+    /// DFU config for this split board.
+    ///
+    /// When set, it completely replaces the global [`dfu`](Self::dfu)
+    /// section for this side. A side without its own `[dfu]` section falls
+    /// back to the global one. This allows e.g. only the central to use an
+    /// external SPI flash (`[dfu.external_flash]`) while the peripheral
+    /// keeps an internal DFU partition, or different SPI pins per board.
+    pub dfu: Option<DfuTomlConfig>,
     /// Path to the peripheral firmware binary for automatic dfu_split update.
     /// Relative to the project's `Cargo.toml`.  When set, the generated code
     /// includes the binary with `include_bytes!` and registers it via
     /// [`set_firmware_update_data`](crate::set_firmware_update_data).
     pub firmware: Option<String>,
-    /// DFU update policy for this peripheral. "MatchHash" (default) only
-    /// flashes when the firmware differs; "force" always flashes.
-    pub update_policy: Option<String>,
+    /// DFU update policy for this peripheral. `"match_hash"` (default) only
+    /// flashes when the firmware differs; `"force"` always flashes.
+    pub update_policy: Option<UpdatePolicy>,
 }
 
 /// Serial port config

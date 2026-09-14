@@ -273,3 +273,46 @@ fn dfu_storage_conflict_absent_without_user_storage() {
         assert!(config.dfu_storage_conflict().is_none(), "{name}: expected no conflict");
     }
 }
+
+#[test]
+fn split_side_dfu_falls_back_to_global() {
+    let path = write_temp_keyboard_toml(
+        "split-side-dfu-fallback",
+        r#"
+[split]
+connection = "serial"
+
+[split.central]
+rows = 1
+cols = 2
+row_offset = 0
+col_offset = 0
+[split.central.matrix]
+matrix_type = "normal"
+row_pins = ["PIN_0"]
+col_pins = ["PIN_1"]
+
+[[split.peripheral]]
+rows = 1
+cols = 1
+row_offset = 1
+col_offset = 2
+[split.peripheral.matrix]
+matrix_type = "normal"
+row_pins = ["PIN_2"]
+col_pins = ["PIN_3"]
+
+[dfu]
+led = "PIN_4"
+"#,
+    );
+    let config = KeyboardTomlConfig::new_from_toml_path(&path);
+    std::fs::remove_file(path).ok();
+
+    // No per-side section: both sides use the global [dfu].
+    let central = config.split_side_dfu(None).unwrap().unwrap();
+    let peripheral = config.split_side_dfu(Some(0)).unwrap().unwrap();
+    assert_eq!(central.led.map(|l| l.pin), Some("PIN_4".into()));
+    assert_eq!(peripheral.led.map(|l| l.pin), Some("PIN_4".into()));
+}
+

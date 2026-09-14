@@ -8,6 +8,7 @@ use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
+use embassy_rp::flash::Flash;
 use embassy_rp::gpio::{Input, Level, Output};
 use embassy_rp::peripherals::{UART0, USB};
 use embassy_rp::uart::{self, BufferedUart};
@@ -16,12 +17,13 @@ use embassy_rp::{bind_interrupts, dma};
 use panic_probe as _;
 use rmk::config::DeviceConfig;
 use rmk::debounce::default_debouncer::DefaultDebouncer;
+use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::dfu_led::DfuLedProcessor;
 use rmk::run_all;
 use rmk::split::SPLIT_MESSAGE_MAX_SIZE;
 use rmk::split::peripheral::run_rmk_split_peripheral;
-use rmk::storage::{async_flash_wrapper, new_storage_without_keymap};
+use rmk::storage::new_storage_without_keymap;
 use rmk::watchdog::Rp2040Watchdog;
 use static_cell::StaticCell;
 
@@ -38,9 +40,12 @@ async fn main(_spawner: Spawner) {
 
     let (row_pins, col_pins) = config_matrix_pins_rp!(peripherals: p, input: [PIN_9, PIN_11], output: [PIN_10, PIN_12]);
 
-    let flash = async_flash_wrapper(rmk::dfu::init_flash_from_linkerscript(p.FLASH));
-
-    rmk::dfu::mark_booted();
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { rmk::dfu::FLASH_SIZE },
+    >::new_blocking(p.FLASH)));
+    let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     // DFU USB device so the peripheral can be firmware-updated via USB
     let dfu_driver = Driver::new(p.USB, Irqs);
@@ -70,12 +75,14 @@ async fn main(_spawner: Spawner) {
         clear_storage: false,
         clear_layout: false,
     };
-    let mut storage = new_storage_without_keymap(flash, storage_config).await;
+    let mut storage = new_storage_without_keymap(storage_partition, storage_config).await;
 
     let mut watchdog_runner = Rp2040Watchdog::default_runner(embassy_rp::watchdog::Watchdog::new(p.WATCHDOG));
 
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
+
     join3(
-        run_all!(matrix, storage, dfu_led, watchdog_runner),
+        run_all!(matrix, storage, dfu_iface, dfu_led, watchdog_runner),
         run_rmk_split_peripheral(uart_instance),
         rmk::usb::run_peripheral_usb(dfu_driver, dfu_device_config),
     )

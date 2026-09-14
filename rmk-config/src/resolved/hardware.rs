@@ -8,10 +8,11 @@ pub use crate::chip::{ChipModel, ChipSeries};
 pub use crate::communication::{CommunicationConfig, UsbInfo};
 use crate::validate_unlock_keys;
 pub use crate::{
-    BleConfig, ChipConfig, CommunicationProtocol, DependencyConfig, DisplayConfig, DisplayDriver, EncoderConfig,
-    EncoderResolution, I2cConfig, InputDeviceConfig, Iqs5xxConfig, Iqs5xxI2cConfig, JoystickConfig, KeyInfo,
-    LightConfig, MatrixConfig, MatrixType, OutputConfig, PinConfig, Pmw33xxConfig, Pmw33xxType, Pmw3610Config,
-    PointingDeviceConfig, SerialConfig, SpiConfig, SplitBoardConfig, SplitConfig,
+    BleConfig, ChipConfig, CommunicationProtocol, DependencyConfig, DfuTomlConfig, DisplayConfig, DisplayDriver,
+    EncoderConfig, EncoderResolution, I2cConfig, InputDeviceConfig,
+    Iqs5xxConfig, Iqs5xxI2cConfig, JoystickConfig, KeyInfo, LightConfig, MatrixConfig, MatrixType, OutputConfig,
+    PinConfig, Pmw33xxConfig, Pmw33xxType, Pmw3610Config, PointingDeviceConfig, SerialConfig, SpiConfig,
+    SplitBoardConfig, SplitConfig,
 };
 
 /// Resolved storage hardware config
@@ -24,7 +25,6 @@ pub struct Storage {
 
 /// Resolved DFU partition config
 pub struct DfuConfig {
-    pub page_size: u32,
     pub led: Option<PinConfig>,
     pub unlock_keys: Vec<[u8; 2]>,
 }
@@ -69,18 +69,7 @@ impl crate::KeyboardTomlConfig {
         } else {
             None
         };
-        let dfu = match self.get_dfu_config() {
-            Some(d) => {
-                let unlock_keys = d.unlock_keys.clone().unwrap_or_default();
-                validate_unlock_keys("[dfu]", &unlock_keys, self.layout.as_ref())?;
-                Some(DfuConfig {
-                    page_size: d.page_size.unwrap_or(4096),
-                    led: d.led.clone().map(|pin| PinConfig { pin, low_active: false }),
-                    unlock_keys,
-                })
-            }
-            None => None,
-        };
+        let dfu = self.split_side_dfu(None)?;
         let light = self.get_light_config();
         let display = self.get_display_config();
         let output = self.get_output_config()?;
@@ -97,5 +86,49 @@ impl crate::KeyboardTomlConfig {
             output,
             dependency,
         })
+    }
+
+    /// Resolve a raw TOML DFU section into the resolved [`DfuConfig`].
+    ///
+    /// `section` names the source for error messages (e.g. `"[dfu]"` or
+    /// `"[split.peripheral[0].dfu]"`).
+    fn resolve_dfu(&self, dfu: Option<&DfuTomlConfig>, section: &str) -> Result<Option<DfuConfig>, String> {
+        match dfu {
+            Some(d) => {
+                let unlock_keys = d.unlock_keys.clone().unwrap_or_default();
+                validate_unlock_keys(section, &unlock_keys, self.layout.as_ref())?;
+                Ok(Some(DfuConfig {
+                    led: d.led.clone().map(|pin| PinConfig { pin, low_active: false }),
+                    unlock_keys,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve the effective DFU config for a split side.
+    ///
+    /// `None` (the central side) uses `[split.central.dfu]` when present,
+    /// otherwise the global `[dfu]` section. A peripheral's own
+    /// `[split.peripheral[i].dfu]` section, when present, **completely
+    /// replaces** the global one; otherwise the peripheral falls back to the
+    /// global section too. A side's own section never merges with the global
+    /// one.
+    pub fn split_side_dfu(&self, side: Option<usize>) -> Result<Option<DfuConfig>, String> {
+        match side {
+            Some(id) => match self
+                .split
+                .as_ref()
+                .and_then(|s| s.peripheral.get(id))
+                .and_then(|p| p.dfu.as_ref())
+            {
+                Some(d) => self.resolve_dfu(Some(d), &format!("[split.peripheral[{id}].dfu]")),
+                None => self.resolve_dfu(self.get_dfu_config().as_ref(), "[dfu]"),
+            },
+            None => match self.split.as_ref().and_then(|s| s.central.dfu.as_ref()) {
+                Some(d) => self.resolve_dfu(Some(d), "[split.central.dfu]"),
+                None => self.resolve_dfu(self.get_dfu_config().as_ref(), "[dfu]"),
+            },
+        }
     }
 }

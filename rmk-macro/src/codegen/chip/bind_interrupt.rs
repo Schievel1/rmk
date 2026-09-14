@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use rmk_config::resolved::Hardware;
-use rmk_config::resolved::hardware::{BoardConfig, InputDeviceConfig, UniBodyConfig};
+use rmk_config::resolved::hardware::{BoardConfig, DfuConfig, InputDeviceConfig, UniBodyConfig};
 use syn::{ItemFn, ItemMod};
 
 use crate::codegen::display::expand_display_interrupt;
@@ -37,7 +37,11 @@ fn is_bind_interrupt_override(item_fn: &ItemFn) -> bool {
 }
 
 /// Expand `bind_interrupt!` stuffs, and other code before `main` function
-pub(crate) fn expand_bind_interrupt(hardware: &Hardware, item_mod: &ItemMod) -> TokenStream2 {
+pub(crate) fn expand_bind_interrupt(
+    hardware: &Hardware,
+    item_mod: &ItemMod,
+    dfu: Option<&DfuConfig>,
+) -> TokenStream2 {
     // If there is a function marked as the bind_interrupt override, use its body
     if let Some((_, items)) = &item_mod.content {
         items
@@ -53,9 +57,9 @@ pub(crate) fn expand_bind_interrupt(hardware: &Hardware, item_mod: &ItemMod) -> 
                 }
                 None
             })
-            .unwrap_or(bind_interrupt_default(hardware, item_mod))
+            .unwrap_or(bind_interrupt_default(hardware, item_mod, dfu))
     } else {
-        bind_interrupt_default(hardware, item_mod)
+        bind_interrupt_default(hardware, item_mod, dfu)
     }
 }
 
@@ -74,7 +78,11 @@ pub(crate) fn find_extern_irqs(item_mod: &ItemMod) -> Vec<TokenStream2> {
 }
 
 /// Expand default `bind_interrupt!` for different chips and nrf-sdc config for nRF52
-pub(crate) fn bind_interrupt_default(hardware: &Hardware, item_mod: &ItemMod) -> TokenStream2 {
+pub(crate) fn bind_interrupt_default(
+    hardware: &Hardware,
+    item_mod: &ItemMod,
+    _dfu: Option<&DfuConfig>,
+) -> TokenStream2 {
     let extern_irqs_vec = find_extern_irqs(item_mod);
     let extern_irqs = if extern_irqs_vec.is_empty() {
         quote! {}

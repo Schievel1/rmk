@@ -12,17 +12,18 @@ use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive};
 use embassy_nrf::interrupt::InterruptExt;
+use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals};
 use keymap::{COL, ROW};
 use panic_probe as _;
 use rmk::config::{BehaviorConfig, DeviceConfig, PositionalConfig, RmkConfig, StorageConfig, VialConfig};
 use rmk::debounce::default_debouncer::DefaultDebouncer;
+use rmk::dfu::{FlashDfuHandler, FlashMutex, partitions_from_linkerscript};
 use rmk::host::HostService;
 use rmk::keyboard::Keyboard;
 use rmk::matrix::Matrix;
 use rmk::processor::builtin::wpm::WpmProcessor;
-use rmk::storage::async_flash_wrapper;
 use rmk::usb::UsbTransport;
 use rmk::{KeymapData, initialize_keymap_and_storage, run_all};
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
@@ -50,8 +51,9 @@ async fn main(_spawner: Spawner) {
     let (row_pins, col_pins) =
         config_matrix_pins_nrf!(peripherals: p, input: [P0_07, P0_22, P0_11, P0_12], output: [P0_13, P0_17, P0_20]);
 
-    // Flash partition layout comes from rmk-memory.x linker script.
-    let flash = async_flash_wrapper(rmk::dfu::init_flash_from_linkerscript(p.NVMC));
+    // Flash partition layout comes from the DFU symbols in memory.x.
+    let flash_mutex = FlashMutex::new(rmk::storage::async_flash_wrapper(Nvmc::new(p.NVMC)));
+    let (storage_partition, state_partition, dfu_partition) = partitions_from_linkerscript(&flash_mutex);
 
     let mut dfu_led_processor = rmk::processor::builtin::dfu_led::DfuLedProcessor::new(
         Output::new(p.P0_15, Level::Low, OutputDrive::Standard),
@@ -85,14 +87,12 @@ async fn main(_spawner: Spawner) {
     let per_key_config = PositionalConfig::default();
     let (keymap, mut storage) = initialize_keymap_and_storage(
         &mut keymap_data,
-        flash,
+        storage_partition,
         &storage_config,
         &mut behavior_config,
         &per_key_config,
     )
     .await;
-
-    rmk::dfu::mark_booted();
 
     // Optional DFU lock — requires the `dfu_lock` Cargo feature.
     // Specify the physical keys to press simultaneously to unlock DFU firmware
@@ -109,6 +109,7 @@ async fn main(_spawner: Spawner) {
     let mut keyboard = Keyboard::new(&keymap);
     let host_service = HostService::new(&keymap, &rmk_config);
 
+    let mut dfu_iface = FlashDfuHandler::new(dfu_partition, state_partition);
     let mut usb_transport = UsbTransport::new(driver, rmk_config.device_config).with_host_service(&host_service);
     let mut wpm_processor = WpmProcessor::new();
 
@@ -116,6 +117,7 @@ async fn main(_spawner: Spawner) {
         matrix,
         storage,
         usb_transport,
+        dfu_iface,
         wpm_processor,
         keyboard,
         dfu_led_processor, // , dfu_lock
