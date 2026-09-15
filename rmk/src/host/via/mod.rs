@@ -220,7 +220,10 @@ impl<'a> VialService<'a> {
                     let via_keycode = LittleEndian::read_u16(&report.output_data[idx..idx + 2]);
                     let action = from_via_keycode(via_keycode);
                     let flat_index = offset as usize + i;
-                    self.ctx.try_set_action_flat(flat_index, action, rows, cols);
+                    let (layer, in_layer) = (flat_index / (rows * cols), flat_index % (rows * cols));
+                    self.ctx
+                        .set_action(layer as u8, (in_layer / cols) as u8, (in_layer % cols) as u8, action)
+                        .await;
                     idx += 2;
                 }
             }

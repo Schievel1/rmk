@@ -23,6 +23,10 @@ impl Handle<GetBehaviorConfig> for RynkService<'_> {
 impl Handle<SetBehaviorConfig> for RynkService<'_> {
     async fn handle(&self, cfg: BehaviorConfig) -> Result<(), RynkError> {
         self.ctx.set_behavior_config(cfg).await;
+        #[cfg(feature = "storage")]
+        if !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
+        }
         Ok(())
     }
 }

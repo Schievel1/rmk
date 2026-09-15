@@ -92,8 +92,8 @@ pub(crate) fn set_ble_profile(profile: u8) {
     });
 }
 
-/// Persistence is the caller's responsibility — enqueue
-/// `FlashOperationMessage::ConnectionType` on `FLASH_CHANNEL`.
+/// Persistence is the caller's responsibility: `storage::store` the new
+/// `ConnectionType`.
 pub(crate) fn set_preferred_connection(t: ConnectionType) {
     update_status(|c| c.preferred = t);
 }
@@ -105,15 +105,18 @@ pub(crate) fn set_preferred_connection(t: ConnectionType) {
 #[cfg(feature = "_ble")]
 pub(crate) async fn load_preferred_connection() -> ConnectionType {
     #[cfg(feature = "storage")]
-    let stored = crate::storage::read_connection_type().await;
-    #[cfg(not(feature = "storage"))]
-    let stored: Option<ConnectionType> = None;
-    match stored {
-        Some(c) => c,
-        #[cfg(feature = "_no_usb")]
-        None => ConnectionType::Ble,
-        #[cfg(not(feature = "_no_usb"))]
-        None => ConnectionType::Usb,
+    if let Ok(Some(crate::storage::StorageData::ConnectionType(c))) =
+        crate::storage::read(crate::storage::StorageKey::ConnectionType).await
+    {
+        return c;
+    }
+    #[cfg(feature = "_no_usb")]
+    {
+        ConnectionType::Ble
+    }
+    #[cfg(not(feature = "_no_usb"))]
+    {
+        ConnectionType::Usb
     }
 }
 
@@ -129,9 +132,7 @@ pub(crate) async fn toggle_preferred() {
     });
     info!("Switching preferred transport to: {:?}", new);
     #[cfg(feature = "storage")]
-    crate::channel::FLASH_CHANNEL
-        .send(crate::storage::FlashOperationMessage::ConnectionType(new))
-        .await;
+    crate::storage::store(crate::storage::StorageItem::ConnectionType(new)).await;
 }
 
 #[cfg(feature = "_ble")]

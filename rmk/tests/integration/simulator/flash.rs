@@ -4,7 +4,7 @@
 //! reads back what the first keyboard persisted — the harness's stand-in for a
 //! power cycle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use embedded_storage::nor_flash::{
@@ -20,13 +20,21 @@ const WRITE: usize = 4;
 #[derive(Clone)]
 pub struct InMemoryFlash {
     data: Rc<RefCell<[u8; SIZE]>>,
+    fail_writes: Rc<Cell<bool>>,
 }
 
 impl InMemoryFlash {
     pub fn new() -> Self {
         Self {
             data: Rc::new(RefCell::new([0xFF; SIZE])),
+            fail_writes: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Reject every write while set, shared by every clone — the stand-in for a
+    /// flash that stops taking data.
+    pub fn fail_writes(&self, fail: bool) {
+        self.fail_writes.set(fail);
     }
 }
 
@@ -61,6 +69,9 @@ impl NorFlash for InMemoryFlash {
 
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
         check_write(self, offset, bytes.len())?;
+        if self.fail_writes.get() {
+            return Err(NorFlashErrorKind::Other);
+        }
         let mut data = self.data.borrow_mut();
         let offset = offset as usize;
         for (current, byte) in data[offset..offset + bytes.len()].iter_mut().zip(bytes) {

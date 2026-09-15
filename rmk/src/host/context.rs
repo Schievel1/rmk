@@ -16,7 +16,7 @@ use crate::event::KeyboardEventPos;
 use crate::keyboard::combo::Combo;
 use crate::keymap::KeyMap;
 #[cfg(feature = "storage")]
-use crate::{channel::FLASH_CHANNEL, storage::FlashOperationMessage};
+use crate::storage::{StorageItem, store};
 
 /// Context shared between Vial and Rynk host services.
 pub(crate) struct KeyboardContext<'a> {
@@ -55,49 +55,13 @@ impl<'a> KeyboardContext<'a> {
         self.keymap
             .set_action_at(KeyboardEventPos::key_pos(col, row), layer as usize, action);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL
-            .send(FlashOperationMessage::KeymapKey {
-                layer,
-                row,
-                col,
-                action,
-            })
-            .await;
-    }
-
-    /// Synchronous on purpose: Vial's bulk-write path (`DynamicKeymapSetBuffer`)
-    /// calls this in a tight loop and would otherwise serialize against flash
-    /// for the whole packet. Drops the persist message on a full channel
-    /// rather than awaiting capacity, matching pre-context Vial behavior.
-    ///
-    /// `rows` / `cols` are passed in so callers can hoist the dimensions read
-    /// out of their loop — see `keymap_dimensions()`.
-    pub fn try_set_action_flat(&self, index: usize, action: KeyAction, rows: usize, cols: usize) {
-        self.keymap.set_action_by_flat_index(index, action);
-        #[cfg(feature = "storage")]
-        {
-            let layer_size = rows * cols;
-            let layer = index / layer_size;
-            let layer_offset = index % layer_size;
-            let row = layer_offset / cols;
-            let col = layer_offset % cols;
-            if FLASH_CHANNEL
-                .try_send(FlashOperationMessage::KeymapKey {
-                    layer: layer as u8,
-                    row: row as u8,
-                    col: col as u8,
-                    action,
-                })
-                .is_err()
-            {
-                error!(
-                    "Failed to persist keymap key at layer {} ({},{}): flash channel full",
-                    layer, row, col
-                );
-            }
-        }
-        #[cfg(not(feature = "storage"))]
-        let _ = (rows, cols);
+        store(StorageItem::Keymap {
+            layer,
+            row,
+            col,
+            action,
+        })
+        .await;
     }
 
     pub fn get_encoder(&self, layer: u8, idx: u8) -> Option<EncoderAction> {
@@ -119,13 +83,12 @@ impl<'a> KeyboardContext<'a> {
         };
         #[cfg(feature = "storage")]
         if let Some(encoder) = updated {
-            FLASH_CHANNEL
-                .send(FlashOperationMessage::Encoder {
-                    idx,
-                    layer,
-                    action: encoder,
-                })
-                .await;
+            store(StorageItem::Encoder {
+                layer,
+                idx,
+                action: encoder,
+            })
+            .await;
         }
         #[cfg(not(feature = "storage"))]
         let _ = updated;
@@ -137,9 +100,7 @@ impl<'a> KeyboardContext<'a> {
         let written = self.keymap.set_encoder(layer as usize, idx as usize, action);
         #[cfg(feature = "storage")]
         if written {
-            FLASH_CHANNEL
-                .send(FlashOperationMessage::Encoder { idx, layer, action })
-                .await;
+            store(StorageItem::Encoder { layer, idx, action }).await;
         }
         #[cfg(not(feature = "storage"))]
         let _ = written;
@@ -154,8 +115,7 @@ impl<'a> KeyboardContext<'a> {
         self.keymap.write_macro_buffer(offset, data);
         #[cfg(feature = "storage")]
         {
-            let buf = self.keymap.get_macro_sequences();
-            FLASH_CHANNEL.send(FlashOperationMessage::MacroData(buf)).await;
+            store(StorageItem::MacroData(self.keymap.get_macro_sequences())).await;
             info!("Flush macros to storage");
         }
     }
@@ -187,7 +147,7 @@ impl<'a> KeyboardContext<'a> {
             return false;
         }
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::Combo { idx, config }).await;
+        store(StorageItem::Combo { idx, config }).await;
         #[cfg(not(feature = "storage"))]
         let _ = config;
         true
@@ -210,7 +170,7 @@ impl<'a> KeyboardContext<'a> {
                 morse.clone()
             });
             if let Some(morse) = updated {
-                FLASH_CHANNEL.send(FlashOperationMessage::Morse { idx, morse }).await;
+                store(StorageItem::Morse { idx, morse }).await;
             }
         }
         #[cfg(not(feature = "storage"))]
@@ -246,43 +206,39 @@ impl<'a> KeyboardContext<'a> {
     pub async fn set_combo_timeout(&self, ms: u16) {
         self.keymap.set_combo_timeout(Duration::from_millis(ms as u64));
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::ComboTimeout(ms)).await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_one_shot_timeout(&self, ms: u16) {
         self.keymap.set_one_shot_timeout(Duration::from_millis(ms as u64));
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::OneShotTimeout(ms)).await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_tap_interval(&self, ms: u16) {
         self.keymap.set_tap_interval(ms);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::TapInterval(ms)).await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_tap_capslock_interval(&self, ms: u16) {
         self.keymap.set_tap_capslock_interval(ms);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::TapCapslockInterval(ms)).await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_morse_default_profile(&self, profile: MorseProfile) {
         self.keymap.set_morse_default_profile(profile);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL
-            .send(FlashOperationMessage::MorseDefaultProfile(profile))
-            .await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_morse_prior_idle_time(&self, ms: u16) {
         self.keymap.set_morse_prior_idle_time(Duration::from_millis(ms as u64));
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::PriorIdleTime(ms)).await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
-    // Whole-struct write for Rynk's SetBehaviorConfig: one flash message instead
-    // of six read-modify-write cycles of the same storage item.
     #[cfg(feature = "rynk")]
     pub async fn set_behavior_config(&self, cfg: BehaviorConfig) {
         self.keymap
@@ -295,22 +251,13 @@ impl<'a> KeyboardContext<'a> {
         self.keymap
             .set_morse_prior_idle_time(Duration::from_millis(cfg.morse_prior_idle_time_ms as u64));
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL
-            .send(FlashOperationMessage::BehaviorConfig(crate::storage::BehaviorConfig {
-                prior_idle_time: cfg.morse_prior_idle_time_ms,
-                morse_default_profile: cfg.morse_default_profile,
-                combo_timeout: cfg.combo_timeout_ms,
-                one_shot_timeout: cfg.oneshot_timeout_ms,
-                tap_interval: cfg.tap_interval_ms,
-                tap_capslock_interval: cfg.tap_capslock_interval_ms,
-            }))
-            .await;
+        store(StorageItem::BehaviorConfig(self.keymap.behavior_snapshot())).await;
     }
 
     pub async fn set_layout_options(&self, opts: u32) {
         self.keymap.set_layout_option(opts);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::LayoutOptions(opts)).await;
+        store(StorageItem::LayoutOption(opts)).await;
     }
 
     pub fn layout_options(&self) -> u32 {
@@ -319,7 +266,7 @@ impl<'a> KeyboardContext<'a> {
 
     pub async fn reset_storage(&self) {
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::Reset).await;
+        crate::storage::reset().await;
     }
 
     pub fn led_indicator(&self) -> LedIndicator {
@@ -346,7 +293,7 @@ impl<'a> KeyboardContext<'a> {
     pub async fn set_default_layer(&self, layer: u8) {
         self.keymap.set_default_layer(layer);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL.send(FlashOperationMessage::DefaultLayer(layer)).await;
+        store(StorageItem::DefaultLayer(layer)).await;
     }
 
     /// Tiebreaker connection currently chosen as preferred — independent
@@ -372,7 +319,7 @@ impl<'a> KeyboardContext<'a> {
         });
         #[cfg(feature = "storage")]
         if valid {
-            FLASH_CHANNEL.send(FlashOperationMessage::Fork { idx, fork }).await;
+            store(StorageItem::Fork { idx, fork }).await;
         }
         valid
     }

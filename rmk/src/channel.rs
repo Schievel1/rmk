@@ -14,8 +14,6 @@ use {crate::ble::profile::BleProfileAction, rmk_types::led_indicator::LedIndicat
 use crate::VIAL_CHANNEL_SIZE;
 use crate::event::KeyboardEvent;
 use crate::hid::{KeyboardReport, Report};
-#[cfg(feature = "storage")]
-use crate::{FLASH_CHANNEL_SIZE, storage::FlashOperationMessage};
 use crate::{REPORT_CHANNEL_SIZE, RawMutex};
 
 type ReportChannel = Channel<RawMutex, Report, REPORT_CHANNEL_SIZE>;
@@ -87,23 +85,6 @@ pub(crate) fn clear_and_release_report_channel(transport: ConnectionType) {
     }
 }
 
-// Sync messages from server to flash
-#[cfg(feature = "storage")]
-pub(crate) static FLASH_CHANNEL: Channel<RawMutex, FlashOperationMessage, FLASH_CHANNEL_SIZE> = Channel::new();
-
-/// Test-only: continuously drain [`FLASH_CHANNEL`] so host-service integration
-/// tests that trigger persistence never block on a full, never-serviced flash
-/// queue — the real firmware's storage task is what normally drains it.
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub async fn drain_flash_channel_for_test() {
-    #[cfg(feature = "storage")]
-    loop {
-        FLASH_CHANNEL.receive().await;
-    }
-    #[cfg(not(feature = "storage"))]
-    core::future::pending::<()>().await
-}
 #[cfg(feature = "_ble")]
 pub(crate) static BLE_PROFILE_CHANNEL: Channel<RawMutex, BleProfileAction, 1> = Channel::new();
 

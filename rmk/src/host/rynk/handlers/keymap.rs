@@ -27,6 +27,10 @@ impl Handle<SetKeyAction> for RynkService<'_> {
         self.ctx
             .set_action(set.position.layer, set.position.row, set.position.col, set.action)
             .await;
+        #[cfg(feature = "storage")]
+        if !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
+        }
         Ok(())
     }
 }
@@ -44,6 +48,10 @@ impl Handle<SetDefaultLayer> for RynkService<'_> {
             return Err(RynkError::Invalid);
         }
         self.ctx.set_default_layer(layer).await;
+        #[cfg(feature = "storage")]
+        if !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
+        }
         Ok(())
     }
 }
@@ -59,6 +67,10 @@ impl Handle<SetEncoderAction> for RynkService<'_> {
     async fn handle(&self, r: SetEncoderRequest) -> Result<(), RynkError> {
         self.check_encoder_bounds(r.layer, r.encoder_id)?;
         self.ctx.set_encoder(r.layer, r.encoder_id, r.action).await;
+        #[cfg(feature = "storage")]
+        if !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
+        }
         Ok(())
     }
 }
@@ -126,6 +138,10 @@ impl HandleBulk<SetKeymapBulk> for RynkService<'_> {
             let row = (offset / cols % rows) as u8;
             let col = (offset % cols) as u8;
             self.ctx.set_action(layer, row, col, action).await;
+        }
+        #[cfg(feature = "storage")]
+        if !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
         }
         msg.encode_response(&())
     }

@@ -233,10 +233,8 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
                     with_feature("_ble"): _ = clear_peer_sub.next_event().fuse() => {
                         #[cfg(feature = "storage")]
                         {
-                            use {crate::channel::FLASH_CHANNEL, crate::split::ble::PeerAddress, crate::storage::FlashOperationMessage};
-                            FLASH_CHANNEL
-                                .send(FlashOperationMessage::PeerAddress(PeerAddress::new(self.id as u8, false, [0; 6])))
-                                .await;
+                            use {crate::split::ble::PeerAddress, crate::storage::{StorageItem, store}};
+                            store(StorageItem::PeerAddress(PeerAddress::new(self.id as u8, false, [0; 6]))).await;
                         }
                         SplitMessage::ClearPeer
                     },

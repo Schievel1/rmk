@@ -120,3 +120,35 @@ fn keymap_write_survives_restart() {
             .await;
     });
 }
+
+/// A rejected write is reported, not hidden: the handler answers `StorageFault`
+/// after the live keymap already holds the new binding, and a keyboard built
+/// over the same flash afterwards still has the old one.
+#[cfg(feature = "storage")]
+#[test]
+fn set_key_on_failing_flash_replies_storage_fault() {
+    const SET_KEY_B: &str = r#"{"position":{"layer":0,"row":0,"col":0},"action":{"Single":{"Key":{"Hid":"B"}}}}"#;
+
+    test_block_on(async {
+        let flash = crate::simulator::flash::InMemoryFlash::new();
+        {
+            let mut keyboard = SimKeyboard::builder([[[k!(A)]]]).build_with_flash(flash.clone()).await;
+            flash.fail_writes(true);
+            keyboard
+                .rynk::<command::SetKeyAction>(SET_KEY_B, RynkReply::Err(RynkError::StorageFault))
+                .tap(0, 0, 10)
+                .expect_keys([HidKeyCode::B])
+                .expect_keys([])
+                .run()
+                .await;
+            flash.fail_writes(false);
+        }
+        let mut keyboard = SimKeyboard::builder([[[k!(A)]]]).build_with_flash(flash).await;
+        keyboard
+            .tap(0, 0, 10)
+            .expect_keys([HidKeyCode::A])
+            .expect_keys([])
+            .run()
+            .await;
+    });
+}

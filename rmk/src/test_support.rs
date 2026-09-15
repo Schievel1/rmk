@@ -30,12 +30,21 @@ pub fn reset_connection_status() {
 
 #[cfg(feature = "storage")]
 pub fn clear_flash_channel() {
-    crate::channel::FLASH_CHANNEL.clear();
+    crate::storage::clear_for_test();
+}
+
+/// Stand-in for the storage task when a simulation has no flash, so nothing
+/// blocks on a full, never-serviced storage queue.
+pub async fn drain_flash_channel() {
+    #[cfg(feature = "storage")]
+    crate::storage::drain_for_test().await;
+    #[cfg(not(feature = "storage"))]
+    core::future::pending::<()>().await
 }
 
 #[cfg(feature = "storage")]
-pub async fn flush_storage() -> bool {
-    crate::storage::flush().await
+pub async fn sync_storage() -> bool {
+    crate::storage::sync().await
 }
 
 const STEP: Duration = Duration::from_micros(100);

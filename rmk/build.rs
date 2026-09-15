@@ -12,40 +12,30 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Compute build hash and write to constants.rs
-    let build_hash = compute_build_hash();
-    let constants = format!(
-        "#[allow(clippy::redundant_static_lifetimes)]\npub(crate) const BUILD_HASH: u32 = {build_hash:#010x};\n"
-    );
-
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("constants.rs");
-    fs::write(&dest_path, constants).expect("Failed to write constants.rs file");
-}
-fn compute_build_hash() -> u32 {
-    // Get the short hash of the latest Git commit. Use "unknown" if it fails
-    let commit_id = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // Get and format current local time
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    // Combine data and compute CRC32
-    let combined = format!("{commit_id}_{now}");
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(combined.as_bytes());
-    hasher.finalize()
+    // The git commit of this rmk checkout, 0 for a copy without git history (crates.io).
+    // Storage written by another commit is wiped, so the script reruns whenever HEAD moves.
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
+        println!("cargo:rerun-if-changed={dir}/HEAD");
+        println!("cargo:rerun-if-changed={dir}/packed-refs");
+        if let Some(head) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            println!("cargo:rerun-if-changed={dir}/{head}");
+        }
+    }
+    let commit = git(&["rev-parse", "--short=8", "HEAD"])
+        .and_then(|hash| u32::from_str_radix(&hash[..hash.len().min(8)], 16).ok())
+        .unwrap_or(0);
+    let constants = Path::new(&env::var("OUT_DIR").unwrap()).join("constants.rs");
+    fs::write(
+        constants,
+        format!("pub(crate) const RMK_COMMIT: u32 = {commit:#010x};\n"),
+    )
+    .unwrap();
 }

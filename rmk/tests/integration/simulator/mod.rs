@@ -359,12 +359,12 @@ impl SimKeyboard {
             )
         });
 
-        // Nothing else drains `FLASH_CHANNEL`, so without a storage task the
+        // Nothing else drains the storage queue, so without a storage task the
         // keyboard would block on it once full.
         let flash = async {
             match storage {
                 Some(storage) => storage.await,
-                None => rmk::channel::drain_flash_channel_for_test().await,
+                None => rmk::test_support::drain_flash_channel().await,
             }
         };
         // Same for the BLE profile task, but keep what it received so tests can check it.
@@ -514,7 +514,7 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
             #[cfg(feature = "storage")]
             SimStep::WaitStorage => {
                 let waiting = format!("no storage write within {TIMEOUT_SECS}s");
-                let written = with_timeout(rmk::test_support::flush_storage(), &waiting).await;
+                let written = with_timeout(rmk::test_support::sync_storage(), &waiting).await;
                 assert!(written, "storage write failed");
             }
             #[cfg(feature = "passkey_entry")]

@@ -1320,9 +1320,7 @@ impl<'a> Keyboard<'a> {
                 // Persist only if the layer was valid (set_default_layer rejects out-of-range)
                 #[cfg(feature = "storage")]
                 if event.pressed && self.keymap.get_default_layer() == layer_num {
-                    crate::channel::FLASH_CHANNEL
-                        .send(crate::storage::FlashOperationMessage::DefaultLayer(layer_num))
-                        .await;
+                    crate::storage::store(crate::storage::StorageItem::DefaultLayer(layer_num)).await;
                 }
             }
             Action::Modifier(modifiers) => {
@@ -1580,9 +1578,7 @@ impl<'a> Keyboard<'a> {
                 // When releasing the key, reset the storage — the same operation
                 // `ViaCommand::EepromReset` performs from the host side
                 if !event.pressed {
-                    crate::channel::FLASH_CHANNEL
-                        .send(crate::storage::FlashOperationMessage::Reset)
-                        .await;
+                    crate::storage::reset().await;
                 }
             }
 

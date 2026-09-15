@@ -559,6 +559,13 @@ impl<'a> KeyMap<'a> {
         self.inner.borrow_mut().layout_option = layout_option;
     }
 
+    /// The behavior config as one storage item; taken after a RAM change so the
+    /// next writer's snapshot includes it.
+    #[cfg(feature = "storage")]
+    pub(crate) fn behavior_snapshot(&self) -> crate::storage::BehaviorConfig {
+        (&*self.inner.borrow().behavior).into()
+    }
+
     pub(crate) fn update_fn_layer_state(&self) {
         self.inner.borrow_mut().update_fn_layer_state();
     }

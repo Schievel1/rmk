@@ -104,12 +104,10 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                         data.encoder_map[layer][idx] = action;
                     }
                 }
-                (StorageKey::LayoutConfig, StorageData::LayoutConfig(config)) => {
-                    // Restore the default (base) layer set via a `PDF` key
-                    behavior.default_layer = config.default_layer;
-                    // Restore the VIA/Vial layout options selection
-                    data.layout_option = config.layout_option;
-                }
+                // Restore the default (base) layer set via a `PDF` key
+                (StorageKey::DefaultLayer, StorageData::DefaultLayer(layer)) => behavior.default_layer = layer,
+                // Restore the VIA/Vial layout options selection
+                (StorageKey::LayoutOption, StorageData::LayoutOption(option)) => data.layout_option = option,
                 _ => continue,
             }
         }
@@ -118,70 +116,37 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     }
 
     pub(crate) async fn read_macro_cache(&mut self, macro_cache: &mut [u8]) -> Result<(), ()> {
-        let read_data = self
-            .flash
-            .fetch_item(&mut self.buffer, &StorageKey::MacroData)
-            .await
-            .map_err(|e| print_storage_error::<F>(e))?;
-
-        if let Some(StorageData::MacroData(data)) = read_data {
+        if let Some(StorageData::MacroData(data)) = self.fetch(StorageKey::MacroData).await? {
             macro_cache.copy_from_slice(&data);
         }
-
         Ok(())
     }
 
     pub(crate) async fn read_combos(&mut self, combos: &mut [Option<Combo>; COMBO_MAX_NUM]) -> Result<(), ()> {
-        use crate::keyboard::combo::Combo;
-
         for (i, item) in combos.iter_mut().enumerate() {
-            let key = StorageKey::combo(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Combo(config)) = read_data {
+            if let Some(StorageData::Combo(config)) = self.fetch(StorageKey::combo(i as u8)).await? {
                 debug!("Read combo config: {:?}", config);
                 *item = Some(Combo::new(config));
             }
         }
-
         Ok(())
     }
 
     pub(crate) async fn read_forks(&mut self, forks: &mut heapless::Vec<Fork, FORK_MAX_NUM>) -> Result<(), ()> {
         for (i, item) in forks.iter_mut().enumerate() {
-            let key = StorageKey::fork(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Fork(fork)) = read_data {
+            if let Some(StorageData::Fork(fork)) = self.fetch(StorageKey::fork(i as u8)).await? {
                 *item = fork;
             }
         }
-
         Ok(())
     }
 
     pub(crate) async fn read_morses(&mut self, morses: &mut heapless::Vec<Morse, MORSE_MAX_NUM>) -> Result<(), ()> {
         for (i, item) in morses.iter_mut().enumerate() {
-            let key = StorageKey::morse(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Morse(morse)) = read_data {
+            if let Some(StorageData::Morse(morse)) = self.fetch(StorageKey::morse(i as u8)).await? {
                 *item = morse;
             }
         }
-
         Ok(())
     }
 }
