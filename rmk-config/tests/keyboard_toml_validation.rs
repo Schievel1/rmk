@@ -162,6 +162,30 @@ unlock_keys = [[0, 0], [2, 0]]
     );
 }
 
+#[test]
+fn battery_adc_rejects_zero_divider_total() {
+    let path = write_temp_keyboard_toml(
+        "battery-zero-divider-total",
+        r#"
+[ble]
+enabled = true
+battery_adc_pin = "P0_02"
+adc_divider_total = 0
+"#,
+    );
+    let config = KeyboardTomlConfig::new_from_toml_path(&path);
+    let result = config.hardware();
+    std::fs::remove_file(path).ok();
+
+    let Err(msg) = result else {
+        panic!("zero battery ADC divider total must fail hardware resolution");
+    };
+    assert!(
+        msg.contains("adc_divider_total") && msg.contains("greater than zero"),
+        "unexpected error: {msg}"
+    );
+}
+
 /// Unknown keys in the sections users edit most must be rejected, not
 /// silently dropped (pre-fix they surfaced as a misleading "X is required"
 /// error that never named the typo).
