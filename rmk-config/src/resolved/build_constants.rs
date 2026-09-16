@@ -159,6 +159,7 @@ impl crate::KeyboardTomlConfig {
             clear_peer,
             dongle_state,
             dfu_status,
+            dfu_cmd,
             action,
             custom_message,
             custom_message_out,
@@ -167,6 +168,7 @@ impl crate::KeyboardTomlConfig {
         // Auto-bump subscriber counts based on enabled feature flags.
         // Declarations live in subscriber_default.toml.
         apply_feature_subscriber_bumps(&mut events, active_features);
+
         // Every link subscribes to the outgoing queue, so a central needs one
         // slot per split peripheral on top of its link toward the dongle.
         if active_features.contains(&"custom_message")
@@ -175,6 +177,16 @@ impl crate::KeyboardTomlConfig {
         {
             event.subs += split_peripherals_num;
         }
+
+        // Dynamically size dfu_cmd subscribers: 1 (central) + N (peripherals).
+        // The base count of 1 covers the central; each peripheral adds one.
+        if active_features.contains(&"dfu_split")
+            && let Some(event) = events.iter_mut().find(|e| e.name == "dfu_cmd")
+        {
+            event.subs += split_peripherals_num;
+            event.pubs += 1; // Split-Loop as second publisher (USB-Proxy is first)
+        }
+
         if !split_battery_peripheral_ids.is_empty()
             && active_features.contains(&"split")
             && active_features.contains(&"_ble")
