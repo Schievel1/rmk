@@ -71,11 +71,11 @@ __bootloader_storage_end   = 0x200000; /* storage partition end */
 Make sure `FLASH : ORIGIN` in your `MEMORY` block starts at your ACTIVE partition. RMK's `partitions_from_linkerscript()` picks up the symbols at runtime. All symbols must use **flash-relative offsets** (byte offsets from the start of the flash chip, not absolute XIP addresses). For RP2040, subtract the flash base (`0x10000000`). For nRF52, flash-relative and absolute offsets are the same (flash starts at `0x00000000`).
 
 ::: tip External Flash DFU
-If your firmware is too large for the internal DFU/ACTIVE partition split, you can offload the DFU download slot to an external SPI NOR flash chip. This frees the internal DFU space and roughly doubles the ACTIVE region. See [External Flash DFU](../configuration/bootloader.mdx#external-flash-dfu-optional-feature-dfu_ext) for setup instructions.
+If your firmware is too large for the internal DFU/ACTIVE partition split, you can offload the DFU download slot to an external SPI NOR flash chip. This frees the internal DFU space and roughly doubles the ACTIVE region. See [External Flash DFU](../../configuration/bootloader.mdx#external-flash-dfu-optional-feature-dfu_ext) for setup instructions.
 :::
 
 ::: tip No DFU updates needed?
-If your firmware doesn't fit into the ACTIVE partition and you don't need USB DFU updates, use an rmk-boot `noswap` build — it grows ACTIVE to the full flash. See [No-swap bootloader](../configuration/bootloader.mdx#no-swap-bootloader-rmk-boot-noswap).
+If your firmware doesn't fit into the ACTIVE partition and you don't need USB DFU updates, use an rmk-boot `noswap` build — it grows ACTIVE to the full flash. See [No-swap bootloader](../../configuration/bootloader.mdx#no-swap-bootloader-rmk-boot-noswap).
 :::
 
 ## Prerequisites
@@ -314,8 +314,8 @@ rmk = { features = [ "dfu_rp", "split", "dfu_split"] }
 ### Peripherals count
 
 Each connected peripheral needs one subscriber slot on `DfuCmdEvent`.
-The number ob subscribers is automatically calculated using the `SPLIT_PERIPHERALS_NUM` constant.
-The constant is automatically set to 1, when the `split` feature is enabled.
+The number of subscribers is automatically calculated using the `SPLIT_PERIPHERALS_NUM` constant.
+The constant is automatically set to 1 when the `split` feature is enabled.
 However, if you have more than one peripheral, increase the constant accordingly:
 ```toml title="keyboard.toml"
 [rmk]

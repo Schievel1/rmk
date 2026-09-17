@@ -439,7 +439,7 @@ impl<DFU: NorFlash + Clone, STATE: NorFlash + Clone> FlashDfuHandler<DFU, STATE>
         let mut dfu = self.dfu_partition.clone();
         let mut hdr = [0u8; 8];
         dfu.read(0, &mut hdr).await.map_err(|_| ())?;
-        info!("dfu: DFU[0..8] = {:02x}", hdr);
+        info!("dfu: DFU[0..8] = {:?}", hdr);
         let all_ff = hdr.iter().all(|&b| b == 0xFF);
         let all_00 = hdr.iter().all(|&b| b == 0x00);
         let msp = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);

@@ -15,13 +15,10 @@ impl Handle<GetFork> for RynkService<'_> {
 
 impl Handle<SetFork> for RynkService<'_> {
     async fn handle(&self, r: SetForkRequest) -> Result<(), RynkError> {
-        if !self.ctx.set_fork(r.index, r.config).await {
-            return Err(RynkError::Invalid);
+        if self.ctx.set_fork(r.index, r.config).await {
+            Ok(())
+        } else {
+            Err(RynkError::Invalid)
         }
-        #[cfg(feature = "storage")]
-        if !crate::storage::sync().await {
-            return Err(RynkError::StorageFault);
-        }
-        Ok(())
     }
 }

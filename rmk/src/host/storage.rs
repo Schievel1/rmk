@@ -124,7 +124,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 
     pub(crate) async fn read_combos(&mut self, combos: &mut [Option<Combo>; COMBO_MAX_NUM]) -> Result<(), ()> {
         for (i, item) in combos.iter_mut().enumerate() {
-            if let Some(StorageData::Combo(config)) = self.fetch(StorageKey::combo(i as u8)).await? {
+            if let Some(StorageData::Combo(config)) = self.fetch(StorageKey::Combo(i as u8)).await? {
                 debug!("Read combo config: {:?}", config);
                 *item = Some(Combo::new(config));
             }
@@ -134,7 +134,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 
     pub(crate) async fn read_forks(&mut self, forks: &mut heapless::Vec<Fork, FORK_MAX_NUM>) -> Result<(), ()> {
         for (i, item) in forks.iter_mut().enumerate() {
-            if let Some(StorageData::Fork(fork)) = self.fetch(StorageKey::fork(i as u8)).await? {
+            if let Some(StorageData::Fork(fork)) = self.fetch(StorageKey::Fork(i as u8)).await? {
                 *item = fork;
             }
         }
@@ -143,7 +143,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 
     pub(crate) async fn read_morses(&mut self, morses: &mut heapless::Vec<Morse, MORSE_MAX_NUM>) -> Result<(), ()> {
         for (i, item) in morses.iter_mut().enumerate() {
-            if let Some(StorageData::Morse(morse)) = self.fetch(StorageKey::morse(i as u8)).await? {
+            if let Some(StorageData::Morse(morse)) = self.fetch(StorageKey::Morse(i as u8)).await? {
                 *item = morse;
             }
         }

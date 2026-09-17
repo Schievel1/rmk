@@ -187,7 +187,11 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                                 error!("dfu_split: chunk too large for DFU command buffer");
                                 continue;
                             }
-                            publish_event(DfuCmdEvent(DfuCmd::Write(DfuTarget::Local, offset as u32, buf)));
+                            // The peripheral never receives Start(Local); the first chunk opens the session.
+                            if offset == 0 {
+                                publish_event(DfuCmdEvent(DfuCmd::Start(DfuTarget::Local)));
+                            }
+                            publish_event(DfuCmdEvent(DfuCmd::Write(DfuTarget::Local, offset, buf)));
                             // Wait for handler to finish write_chunk before sending ack
                             loop {
                                 match SPLIT_RESPONSE_CHANNEL.receiver().receive().await {

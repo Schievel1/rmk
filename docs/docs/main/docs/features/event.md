@@ -66,7 +66,7 @@ RMK provides built-in event types organized by category. All of them are exporte
 **DFU Events** (when a DFU feature like `dfu_rp` or `dfu_nrf` is enabled):
 
 - `DfuStatusEvent` - DFU status changed (`DfuStatus`: idle, started, downloading, finished, error, lock waiting, unlocked)
-- `DfuCmdEvent` - DFU command forwarded from the USB DFU proxy to the async updater task. Internal use only — published by the USB ISR, consumed by `FlashDfuHandler` (central) and `PeripheralManager` (peripheral passthrough). Subscribers: 1 by default (central only); bumps to 3 when `dfu_split` is enabled (done automatically). Users with more than two peripherals must increase `[event.dfu_cmd].subs` in `keyboard.toml`.
+- `DfuCmdEvent` - DFU command forwarded from the USB DFU proxy to the async updater task. Internal use only — published by the USB ISR, consumed by `FlashDfuHandler` (central) and `PeripheralManager` (peripheral passthrough). The base subscriber count is 1 for the local flash handler. RMK automatically adds one slot per configured split peripheral when `dfu_split` is enabled and one slot for `DfuLock` when `dfu_lock` is enabled.
 
 ## Defining Custom Events
 

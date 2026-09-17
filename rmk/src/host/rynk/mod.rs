@@ -46,6 +46,24 @@ impl<'a> RynkService<'a> {
         }
     }
 
+    /// Whether `cmd` changes state that storage persists.
+    fn persists(cmd: Cmd) -> bool {
+        matches!(
+            cmd,
+            Cmd::SetKeyAction
+                | Cmd::SetDefaultLayer
+                | Cmd::SetEncoderAction
+                | Cmd::SetMacro
+                | Cmd::SetCombo
+                | Cmd::SetMorse
+                | Cmd::SetFork
+                | Cmd::SetBehaviorConfig
+                | Cmd::SetKeymapBulk
+                | Cmd::SetComboBulk
+                | Cmd::SetMorseBulk
+        )
+    }
+
     /// Whether `cmd` needs an unlocked device.
     fn requires_unlock(&self, cmd: Cmd) -> bool {
         match cmd {
@@ -53,23 +71,15 @@ impl<'a> RynkService<'a> {
             // Deleting a bond opens a re-pair hijack window; BLE-only command.
             #[cfg(feature = "_ble")]
             Cmd::ClearBleProfile => true,
-            Cmd::SetKeyAction
-            | Cmd::SetDefaultLayer
-            | Cmd::SetEncoderAction
-            | Cmd::SetMacro
-            | Cmd::SetCombo
-            | Cmd::SetMorse
-            | Cmd::SetFork
-            | Cmd::SetBehaviorConfig
-            | Cmd::SetKeymapBulk
-            | Cmd::SetComboBulk
-            | Cmd::SetMorseBulk => self.lock_config.write_requires_unlock,
-            _ => false,
+            _ => Self::persists(cmd) && self.lock_config.write_requires_unlock,
         }
     }
 
     /// Serve one inbound message: on success the reply frame replaces the
     /// payload in place; on error the caller answers with the error envelope.
+    ///
+    /// A command that persists state is answered only once its writes have
+    /// landed, so handlers never have to remember to wait for storage.
     async fn dispatch(&self, locker: &HostLock<'_>, msg: &mut RynkMessage<'_>) -> Result<(), RynkError> {
         let cmd = msg.header().cmd;
 
@@ -77,6 +87,15 @@ impl<'a> RynkService<'a> {
             return Err(RynkError::Locked);
         }
 
+        let served = self.serve_cmd(cmd, locker, msg).await;
+        #[cfg(feature = "storage")]
+        if served.is_ok() && Self::persists(cmd) && !crate::storage::sync().await {
+            return Err(RynkError::StorageFault);
+        }
+        served
+    }
+
+    async fn serve_cmd(&self, cmd: Cmd, locker: &HostLock<'_>, msg: &mut RynkMessage<'_>) -> Result<(), RynkError> {
         match cmd {
             Cmd::GetVersion => serve::<command::GetVersion, _>(self, msg).await,
             Cmd::GetCapabilities => serve::<command::GetCapabilities, _>(self, msg).await,

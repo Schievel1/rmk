@@ -727,13 +727,6 @@ impl<'a> KeyMap<'a> {
         }
     }
 
-    pub(crate) fn set_action_by_flat_index(&self, index: usize, action: KeyAction) {
-        let mut inner = self.inner.borrow_mut();
-        if index < inner.layers.len() {
-            inner.layers[index] = action;
-        }
-    }
-
     pub(crate) fn num_encoders(&self) -> usize {
         self.inner.borrow().num_encoder
     }

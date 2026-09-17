@@ -57,6 +57,46 @@ pub struct Hardware {
 impl crate::KeyboardTomlConfig {
     /// Resolve hardware configuration from TOML config.
     pub fn hardware(&self) -> Result<Hardware, String> {
+        let validate_divider = |section: &str, pin: Option<&str>, measured, total| {
+            if pin.is_some_and(|pin| pin != "vddh") {
+                for (field, value) in [("adc_divider_measured", measured), ("adc_divider_total", total)] {
+                    if value == Some(0) {
+                        return Err(format!("keyboard.toml: {section}.{field} must be greater than zero"));
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Some(ble) = &self.ble
+            && ble.enabled
+            && self
+                .split
+                .as_ref()
+                .is_none_or(|split| split.central.battery_adc_pin.is_none())
+        {
+            validate_divider(
+                "[ble]",
+                ble.battery_adc_pin.as_deref(),
+                ble.adc_divider_measured,
+                ble.adc_divider_total,
+            )?;
+        }
+        if let Some(split) = &self.split {
+            validate_divider(
+                "[split.central]",
+                split.central.battery_adc_pin.as_deref(),
+                split.central.adc_divider_measured,
+                split.central.adc_divider_total,
+            )?;
+            for (id, peripheral) in split.peripheral.iter().enumerate() {
+                validate_divider(
+                    &format!("[[split.peripheral]] #{id}"),
+                    peripheral.battery_adc_pin.as_deref(),
+                    peripheral.adc_divider_measured,
+                    peripheral.adc_divider_total,
+                )?;
+            }
+        }
         let chip = self.get_chip_model()?;
         let chip_config = self.get_chip_config();
         let communication = self.get_communication_config()?;

@@ -57,8 +57,6 @@ compile_error!("feature `dfu_lock` requires the `_dfu` feature — enable `dfu_r
 // Re-export self as ::rmk for macro-generated code to work both inside and outside the crate
 extern crate self as rmk;
 
-include!(concat!(env!("OUT_DIR"), "/constants.rs"));
-
 // TODO: re-export to `constants`?
 pub(crate) use rmk_types::constants::*;
 
@@ -98,6 +96,8 @@ pub mod config;
 pub mod core_traits;
 #[cfg(feature = "dfu_split")]
 pub mod crc32;
+#[cfg(feature = "custom_message")]
+pub mod custom_message;
 pub mod debounce;
 #[cfg(feature = "_dfu")]
 pub mod dfu;

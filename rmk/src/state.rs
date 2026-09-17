@@ -110,12 +110,9 @@ pub(crate) async fn load_preferred_connection() -> ConnectionType {
     {
         return c;
     }
-    #[cfg(feature = "_no_usb")]
-    {
+    if cfg!(feature = "_no_usb") {
         ConnectionType::Ble
-    }
-    #[cfg(not(feature = "_no_usb"))]
-    {
+    } else {
         ConnectionType::Usb
     }
 }

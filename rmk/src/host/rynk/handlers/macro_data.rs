@@ -21,10 +21,6 @@ impl Handle<GetMacro> for RynkService<'_> {
 impl Handle<SetMacro> for RynkService<'_> {
     async fn handle(&self, r: SetMacroRequest) -> Result<(), RynkError> {
         self.ctx.write_macro_buffer(r.offset as usize, &r.data.data).await;
-        #[cfg(feature = "storage")]
-        if !crate::storage::sync().await {
-            return Err(RynkError::StorageFault);
-        }
         Ok(())
     }
 }

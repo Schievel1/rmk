@@ -24,10 +24,6 @@ impl Handle<SetMorse> for RynkService<'_> {
                 *m = r.config;
             })
             .await;
-        #[cfg(feature = "storage")]
-        if !crate::storage::sync().await {
-            return Err(RynkError::StorageFault);
-        }
         Ok(())
     }
 }
@@ -47,10 +43,6 @@ impl HandleBulk<SetMorseBulk> for RynkService<'_> {
         let start_index = take_element::<u8>(&mut cursor)? as usize;
         for (idx, config) in take_bulk::<Morse>(&mut cursor, start_index, self.ctx.morses_len())? {
             self.ctx.update_morse(idx as u8, |m| *m = config).await;
-        }
-        #[cfg(feature = "storage")]
-        if !crate::storage::sync().await {
-            return Err(RynkError::StorageFault);
         }
         msg.encode_response(&())
     }
