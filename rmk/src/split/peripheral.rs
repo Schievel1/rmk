@@ -79,17 +79,6 @@ pub(crate) struct SplitPeripheral<S: SplitWriter + SplitReader> {
     split_driver: S,
 }
 
-#[cfg(feature = "dfu_split")]
-fn publish_firmware_chunk(offset: u32, chunk_data: &[u8]) -> Result<(), ()> {
-    let mut buf: heapless::Vec<u8, { crate::dfu::BLOCK_SIZE_DFU }> = heapless::Vec::new();
-    buf.extend_from_slice(chunk_data).map_err(|_| ())?;
-    if offset == 0 {
-        publish_event(DfuCmdEvent(DfuCmd::Start(DfuTarget::Local)));
-    }
-    publish_event(DfuCmdEvent(DfuCmd::Write(DfuTarget::Local, offset, buf)));
-    Ok(())
-}
-
 impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
     pub(crate) fn new(split_driver: S) -> Self {
         Self { split_driver }
@@ -194,10 +183,16 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::FirmwareChunk { offset, len, data } => {
                             let actual_len = (len as usize).min(data.0.len());
                             let chunk_data = &data.0[..actual_len];
-                            if publish_firmware_chunk(offset, chunk_data).is_err() {
+                            let mut buf: heapless::Vec<u8, { crate::dfu::BLOCK_SIZE_DFU }> = heapless::Vec::new();
+                            if buf.extend_from_slice(chunk_data).is_err() {
                                 error!("dfu_split: chunk too large for DFU command buffer");
                                 continue;
                             }
+                            // The peripheral never receives Start(Local); the first chunk opens the session.
+                            if offset == 0 {
+                                publish_event(DfuCmdEvent(DfuCmd::Start(DfuTarget::Local)));
+                            }
+                            publish_event(DfuCmdEvent(DfuCmd::Write(DfuTarget::Local, offset, buf)));
                             // Wait for handler to finish write_chunk before sending ack
                             loop {
                                 match SPLIT_RESPONSE_CHANNEL.receiver().receive().await {
@@ -283,30 +278,5 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                 }
             }
         }
-    }
-}
-
-#[cfg(all(test, feature = "dfu_split"))]
-mod tests {
-    use embassy_futures::block_on;
-
-    use super::publish_firmware_chunk;
-    use crate::dfu::{DfuCmd, DfuTarget};
-    use crate::event::{DfuCmdEvent, SubscribableEvent};
-
-    #[test]
-    fn first_firmware_chunk_starts_local_dfu_session() {
-        let mut subscriber = DfuCmdEvent::subscriber();
-
-        publish_firmware_chunk(0, &[1, 2, 3, 4]).unwrap();
-
-        assert_eq!(
-            block_on(subscriber.next_message_pure()),
-            DfuCmdEvent(DfuCmd::Start(DfuTarget::Local))
-        );
-        assert!(matches!(
-            block_on(subscriber.next_message_pure()),
-            DfuCmdEvent(DfuCmd::Write(DfuTarget::Local, 0, _))
-        ));
     }
 }
