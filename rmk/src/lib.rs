@@ -98,6 +98,8 @@ pub mod config;
 pub mod core_traits;
 #[cfg(feature = "dfu_split")]
 pub mod crc32;
+#[cfg(feature = "custom_message")]
+pub mod custom_message;
 pub mod debounce;
 #[cfg(feature = "_dfu")]
 pub mod dfu;
