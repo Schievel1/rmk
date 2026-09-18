@@ -1,12 +1,22 @@
 //! Physical-presence unlock gate shared by the Vial and Rynk host services.
 
 use core::cell::Cell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_time::{Duration, Instant};
 #[cfg(feature = "rynk")]
 use rmk_types::protocol::rynk::LockStatus;
 
 use crate::keymap::KeyMap;
+
+/// Mirror of the unlocked state for code outside the host session — the USB
+/// DFU runtime interface gates its DETACH on it.
+static UNLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the host lock currently stands unlocked.
+pub(crate) fn unlocked() -> bool {
+    UNLOCKED.load(Ordering::Relaxed)
+}
 
 /// Unlock gate. Interior mutability lets protocol handlers update it through a
 /// shared reference without holding a borrow across an `.await` point.
@@ -25,6 +35,7 @@ pub(crate) struct HostLock<'a> {
 
 impl<'a> HostLock<'a> {
     pub fn new(unlock_keys: &'a [(u8, u8)], keymap: &'a KeyMap<'a>, insecure: bool, window: Duration) -> Self {
+        UNLOCKED.store(insecure, Ordering::Relaxed);
         Self {
             unlocked: Cell::new(insecure),
             unlocking: Cell::new(false),
@@ -55,6 +66,7 @@ impl<'a> HostLock<'a> {
         if self.unlocking.get() {
             self.unlocked.set(true);
             self.unlocking.set(false);
+            UNLOCKED.store(true, Ordering::Relaxed);
         }
     }
 
@@ -74,6 +86,7 @@ impl<'a> HostLock<'a> {
 
     pub fn lock(&self) {
         self.unlocked.set(false);
+        UNLOCKED.store(false, Ordering::Relaxed);
     }
 
     /// Challenge keys not currently held — no arm, no commit.
