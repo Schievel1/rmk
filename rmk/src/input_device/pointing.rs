@@ -8,7 +8,9 @@ use rmk_macro::{input_device, processor};
 use rmk_types::keycode::HidKeyCode;
 
 use crate::channel::send_hid_report;
-use crate::event::{Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent};
+use crate::event::{
+    Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent, SleepStateEvent,
+};
 use crate::hid::{KeyboardReport, MouseReport, Report};
 use crate::keymap::KeyMap;
 
@@ -52,6 +54,12 @@ pub trait PointingDriver {
         debug!("set_resolution() is not implemented for this sensor.");
         Err(PointingDriverError::NotImplementedError)
     }
+    /// Set low-power mode.
+    /// A pointing driver which has low-power mode should re-implement this function.
+    /// This function is called when the keyboard goes idle(sleep).
+    async fn set_low_power(&mut self, _enabled: bool) -> Result<(), PointingDriverError> {
+        Ok(())
+    }
 }
 
 /// Initialization state for the device
@@ -66,7 +74,7 @@ pub enum InitState {
 /// PointingDevice an InputDevice for RMK
 ///
 /// This device publishes `PointingEvent` events with relative X/Y movement.
-#[processor(subscribe = [PointingSetCpiEvent])]
+#[processor(subscribe = [PointingSetCpiEvent, SleepStateEvent])]
 #[input_device(publish = PointingEvent)]
 pub struct PointingDevice<S: PointingDriver> {
     pub sensor: S,
@@ -180,6 +188,17 @@ impl<S: PointingDriver> PointingDevice<S> {
             if let Err(err) = self.sensor.set_resolution(e.cpi).await {
                 debug!("PointingDevice {}: Setting resolution failed: {:?}", self.id, err);
             }
+        }
+    }
+
+    async fn on_sleep_state_event(&mut self, e: SleepStateEvent) {
+        // Before init the sensor has no registers to update; init applies the
+        // awake state itself.
+        if self.init_state != InitState::Ready {
+            return;
+        }
+        if let Err(err) = self.sensor.set_low_power(e.0).await {
+            debug!("PointingDevice {}: low power switch failed: {:?}", self.id, err);
         }
     }
 
