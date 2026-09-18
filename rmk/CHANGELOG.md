@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Make Trouble BLE roles explicit, document environment-variable memory tuning, update the nRF52832 examples to peripheral-only SDC, and derive split notification capacity from Trouble's configured packet-pool MTU.
+- Give dongles a USB DFU runtime interface: a DETACH in the 30 s after plug-in reboots into the bootloader (`jump_to_bootloader`), so a dongle can be updated with `dfu-util` or rmk-gui although its host protocol is relayed to the keyboard.
 - Publish the dongle's state.
 - Add `dfu_ext` feature for DFU writes to external SPI flash (e.g. W25Q64), so boards with limited internal flash can store the new firmware image externally.
 - Publish the dongle's state.

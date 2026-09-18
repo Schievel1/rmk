@@ -26,6 +26,8 @@ use crate::state::{current_usb_state, set_usb_state};
 
 #[cfg(feature = "_dfu")]
 pub(crate) mod dfu;
+#[cfg(feature = "dongle")]
+pub(crate) mod dfu_detach;
 // The Rynk vendor interface serves the keyboard's Rynk session and the dongle's router.
 #[cfg(any(feature = "rynk", all(feature = "dongle", not(feature = "vial"))))]
 pub(crate) mod rynk;
@@ -163,6 +165,9 @@ impl<'d, D: Driver<'d>> HidWriterTrait for UsbKeyboardWriter<'_, 'd, D> {
     }
 }
 
+/// bRequest value Windows sends to fetch the MS OS 2.0 descriptor set.
+pub(crate) const MSOS_VENDOR_CODE: u8 = 0x52;
+
 /// Report id byte plus the largest composite payload, which is the mouse report.
 const COMPOSITE_WRITE_SIZE: usize = 1 + MOUSE_REPORT_SIZE;
 
@@ -172,7 +177,7 @@ const DEFAULT_CONFIG_DESC_SIZE: usize = if cfg!(any(
     feature = "steno",
     feature = "_dfu",
     feature = "rynk",
-    all(feature = "dongle", not(feature = "vial"))
+    feature = "dongle"
 )) {
     256
 } else {
@@ -221,11 +226,12 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
     #[cfg(not(feature = "_dfu"))]
     const CONTROL_BUF_SIZE: usize = DEFAULT_CONFIG_DESC_SIZE;
 
-    // The rynk MS OS 2.0 descriptor set (WinUSB binding) takes ~178 bytes, and
-    // its BOS platform capability another 28 on top of the 5-byte BOS header.
-    const RYNK_INTERFACE: bool = cfg!(any(feature = "rynk", all(feature = "dongle", not(feature = "vial"))));
-    const BOS_BUF_SIZE: usize = if RYNK_INTERFACE { 64 } else { 16 };
-    const MSOS_BUF_SIZE: usize = if RYNK_INTERFACE { 256 } else { 16 };
+    // The rynk MS OS 2.0 descriptor set (WinUSB binding) takes ~178 bytes, the
+    // dongle's DFU runtime interface another 28, and the BOS platform
+    // capability 28 on top of the 5-byte BOS header.
+    const WINUSB: bool = cfg!(any(feature = "rynk", feature = "dongle"));
+    const BOS_BUF_SIZE: usize = if WINUSB { 64 } else { 16 };
+    const MSOS_BUF_SIZE: usize = if WINUSB { 256 } else { 16 };
 
     static BOS_DESC: StaticCell<[u8; BOS_BUF_SIZE]> = StaticCell::new();
     static MSOS_DESC: StaticCell<[u8; MSOS_BUF_SIZE]> = StaticCell::new();
@@ -369,6 +375,9 @@ impl<D: Driver<'static>> UsbTransportBuilder<D> {
 
         #[cfg(any(feature = "host", feature = "dongle"))]
         let (host_reader, host_writer) = host_usb::build_host_usb(&mut builder);
+        // After the vendor interface: whichever comes first writes the MS OS header.
+        #[cfg(feature = "dongle")]
+        dfu_detach::register(&mut builder);
 
         Self {
             builder,
