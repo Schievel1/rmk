@@ -1,19 +1,18 @@
-//! A USB DFU runtime interface: `DFU_DETACH` reboots into the bootloader.
+//! A USB DFU runtime interface for dongles: `DFU_DETACH` reboots into the
+//! bootloader.
 //!
-//! For firmware whose bootloader does the flashing. The interface carries no
-//! data — a host that wants to update the device asks it to leave, then talks
-//! DFU to whatever enumerates next. It needs no host protocol, so it works on
-//! a dongle that only relays Vial, and with `dfu-util` alone.
+//! A dongle relays its keyboard's host protocol, so the Rynk and Vial
+//! bootloader commands never reach it; and with one flash slot it cannot take
+//! a download itself. This interface carries no data — a host that wants to
+//! update the dongle asks it to leave, then talks DFU to the bootloader that
+//! enumerates next. `dfu-util` and rmk-gui both speak it.
 //!
-//! Leaving for the bootloader is what the host lock exists to gate: a
-//! bootloader flashes whatever it is given. With `host_lock` the DETACH is
-//! honoured only while the lock stands unlocked; without it a keyboard honours
-//! it outright, as its Vial bootloader command already does. A dongle has no
-//! keys to unlock with, and being bus-powered it boots when plugged in, so
-//! there the DETACH is honoured only in the first seconds after boot. A refused
-//! DETACH is simply not acted on; the host sees the device stay.
+//! A bootloader flashes whatever it is given, so leaving for it needs proof
+//! that someone is there. A dongle has no keys, but being bus-powered it boots
+//! when plugged in: the DETACH is honoured only in the first seconds after
+//! boot. Later ones are simply not acted on; the host sees the dongle stay.
 
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use embassy_usb::Builder;
 use embassy_usb::class::dfu::app_mode::{self, DfuState};
 use embassy_usb::class::dfu::consts::DfuAttributes;
@@ -21,33 +20,33 @@ use embassy_usb::driver::Driver;
 use embassy_usb::msos;
 use static_cell::StaticCell;
 
+#[cfg(not(feature = "dongle"))]
+compile_error!("`dfu_detach` is for dongles: a keyboard enters its bootloader through its host protocol");
+
+/// Long enough to replug and click; short enough that a host cannot simply
+/// wait for it.
+const PLUG_WINDOW: Duration = Duration::from_secs(30);
+
 struct Detach;
 
 impl app_mode::Handler for Detach {
     fn enter_dfu(&mut self) {
-        #[cfg(feature = "host_lock")]
-        let allowed = crate::host::lock::unlocked();
-        #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
-        let allowed = embassy_time::Instant::now() <= embassy_time::Instant::from_secs(30);
-        #[cfg(not(any(feature = "host_lock", feature = "dongle")))]
-        let allowed = true;
-
-        if allowed {
+        if Instant::now() <= Instant::MIN + PLUG_WINDOW {
             crate::boot::jump_to_bootloader()
         } else {
-            info!("DFU_DETACH refused: locked");
+            info!("DFU_DETACH ignored: plug-in window over");
         }
     }
 }
 
 pub(crate) fn register<D: Driver<'static>>(builder: &mut Builder<'static, D>) {
     // The vendor interface writes the MS OS 2.0 header when it is present;
-    // without it (a Vial-only build) this interface is the first to need one.
+    // without it (a Vial dongle) this interface is the first to need one.
     if builder.msos_writer().is_empty() {
         builder.msos_descriptor(msos::windows_version::WIN8_1, super::MSOS_VENDOR_CODE);
     }
     static STATE: StaticCell<DfuState<Detach>> = StaticCell::new();
-    // `WILL_DETACH`: the device resets itself on DETACH rather than waiting for
+    // `WILL_DETACH`: the dongle resets itself on DETACH rather than waiting for
     // the host's bus reset, which neither WebUSB nor nusb on Windows can issue.
     let state = STATE.init(DfuState::new(
         Detach,

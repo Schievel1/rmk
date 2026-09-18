@@ -165,9 +165,6 @@ impl<'d, D: Driver<'d>> HidWriterTrait for UsbKeyboardWriter<'_, 'd, D> {
     }
 }
 
-#[cfg(all(feature = "_dfu", feature = "dfu_detach"))]
-compile_error!("`dfu_detach` is for a bootloader that flashes; `dfu_rp`/`dfu_nrf` already handle DETACH");
-
 /// bRequest value Windows sends to fetch the MS OS 2.0 descriptor set.
 pub(crate) const MSOS_VENDOR_CODE: u8 = 0x52;
 

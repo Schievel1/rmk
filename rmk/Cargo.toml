@@ -247,11 +247,11 @@ adafruit_bl = ["_nrf_ble"]
 ## Enable feature if you're using the ZSA Voyager ignition DFU bootloader
 zsa_voyager_bl = []
 
-## Add a USB DFU runtime interface: a DFU_DETACH from the host runs `jump_to_bootloader`,
-## so any DFU tool (rmk-gui, dfu-util) can reboot the device into its bootloader without a
-## host protocol. With `host_lock` it is honoured only while the lock is unlocked; a dongle,
-## having no keys, honours it only for 30 s after plug-in. Pair with a bootloader feature such as `adafruit_bl`. Not for
-## `dfu_rp`/`dfu_nrf`, whose interface already handles DETACH.
+## Dongle only. Add a USB DFU runtime interface: a DFU_DETACH from the host runs
+## `jump_to_bootloader`, so any DFU tool (rmk-gui, dfu-util) can reboot the dongle into its
+## bootloader — its host protocol is relayed to the keyboard, so the bootloader commands never
+## reach it. Honoured only for 30 s after plug-in; the dongle has no keys to unlock with.
+## Pair with a bootloader feature such as `adafruit_bl`.
 dfu_detach = []
 
 ## **Experimental.** Enable DFU firmware update support (USB DFU interface).
