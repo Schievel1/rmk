@@ -7,11 +7,12 @@
 //! works on a dongle that only relays Vial, and with `dfu-util` alone.
 //!
 //! Leaving for the bootloader is what the host lock exists to gate: a
-//! bootloader flashes whatever it is given. With a host lock the DETACH is
-//! honoured only while it stands unlocked, the same proof of presence the Rynk
-//! bootloader command demands. Without one — a dongle, which has no keys, or a
-//! Vial-only build — the one physical act left is plugging the device in, so
-//! the DETACH is honoured only in the seconds after the bus comes up.
+//! bootloader flashes whatever it is given. On a keyboard the DETACH is
+//! honoured only while the host lock stands unlocked, the same proof of
+//! presence the Rynk bootloader command demands — so a keyboard build needs
+//! `host_lock`. A dongle has no keys to unlock with; its one physical act is
+//! being plugged in, so there the DETACH is honoured only in the seconds after
+//! the bus comes up.
 
 use embassy_time::Duration;
 #[cfg(not(feature = "host_lock"))]
@@ -24,6 +25,11 @@ use embassy_usb::driver::Driver;
 use embassy_usb::{Handler, msos};
 use static_cell::StaticCell;
 
+#[cfg(not(any(feature = "host_lock", feature = "dongle")))]
+compile_error!(
+    "`dfu_detach` on a keyboard needs `host_lock`: leaving for the bootloader takes the same unlock as the Rynk bootloader command"
+);
+
 /// `bRequest` of `DFU_DETACH`.
 const REQ_DETACH: u8 = 0;
 /// DFU functional descriptor type, and the class triple of a runtime interface.
@@ -35,8 +41,7 @@ const PROTOCOL_RUNTIME: u8 = 0x01;
 /// `wDetachTimeout`: moot with `WILL_DETACH`, but the descriptor needs one.
 const DETACH_TIMEOUT: Duration = Duration::from_millis(1000);
 
-/// How long after the bus comes up a device without a host lock honours a
-/// DETACH. Long enough to replug and click; short enough that a host cannot
+/// How long after the bus comes up a dongle honours a DETACH. Long enough to replug and click; short enough that a host cannot
 /// simply wait for it.
 #[cfg(not(feature = "host_lock"))]
 const PLUG_WINDOW: Duration = Duration::from_secs(30);
