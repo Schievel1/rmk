@@ -2,20 +2,27 @@
 //!
 //! For firmware whose bootloader does the flashing (rmk-boot, Adafruit, or a
 //! single-bank bootloader on a part too small for two slots). The interface
-//! carries no data — a host that wants to update the device asks it to leave,
+//! carries no d        #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
+        {
+            self.plugged.is_some_and(|at| at.elapsed() <= PLUG_WINDOW)
+        }
+        #[cfg(not(any(feature = "host_lock", feature = "dongle")))]
+        {
+            true
+        }a — a host that wants to update the device asks it to leave,
 //! then talks DFU to whatever enumerates next. It needs no host protocol, so it
 //! works on a dongle that only relays Vial, and with `dfu-util` alone.
 //!
 //! Leaving for the bootloader is what the host lock exists to gate: a
-//! bootloader flashes whatever it is given. On a keyboard the DETACH is
-//! honoured only while the host lock stands unlocked, the same proof of
-//! presence the Rynk bootloader command demands — so a keyboard build needs
-//! `host_lock`. A dongle has no keys to unlock with; its one physical act is
-//! being plugged in, so there the DETACH is honoured only in the seconds after
-//! the bus comes up.
+//! bootloader flashes whatever it is given. With `host_lock` the DETACH is
+//! honoured only while the lock stands unlocked, the same proof of presence
+//! the Rynk bootloader command demands; without it a keyboard honours it
+//! outright, as its Vial bootloader command already does. A dongle has no keys
+//! to unlock with; its one physical act is being plugged in, so there the
+//! DETACH is honoured only in the seconds after the bus comes up.
 
 use embassy_time::Duration;
-#[cfg(not(feature = "host_lock"))]
+#[cfg(all(feature = "dongle", not(feature = "host_lock")))]
 use embassy_time::Instant;
 use embassy_usb::Builder;
 use embassy_usb::class::dfu::app_mode::{self, DfuState};
@@ -43,7 +50,7 @@ const DETACH_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// How long after the bus comes up a dongle honours a DETACH. Long enough to replug and click; short enough that a host cannot
 /// simply wait for it.
-#[cfg(not(feature = "host_lock"))]
+#[cfg(all(feature = "dongle", not(feature = "host_lock")))]
 const PLUG_WINDOW: Duration = Duration::from_secs(30);
 
 struct Detach;
@@ -58,7 +65,7 @@ impl app_mode::Handler for Detach {
 struct Gate {
     inner: DfuState<Detach>,
     /// When the bus last came up.
-    #[cfg(not(feature = "host_lock"))]
+    #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
     plugged: Option<Instant>,
 }
 
@@ -76,7 +83,7 @@ impl Gate {
 }
 
 impl Handler for Gate {
-    #[cfg(not(feature = "host_lock"))]
+    #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
     fn enabled(&mut self, enabled: bool) {
         if enabled {
             self.plugged = Some(Instant::now());
@@ -138,7 +145,7 @@ pub(crate) fn register<D: Driver<'static>>(builder: &mut Builder<'static, D>) {
     static GATE: StaticCell<Gate> = StaticCell::new();
     builder.handler(GATE.init(Gate {
         inner: DfuState::new(Detach, attrs, DETACH_TIMEOUT),
-        #[cfg(not(feature = "host_lock"))]
+        #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
         plugged: None,
     }));
 }

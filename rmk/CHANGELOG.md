@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Make Trouble BLE roles explicit, document environment-variable memory tuning, update the nRF52832 examples to peripheral-only SDC, and derive split notification capacity from Trouble's configured packet-pool MTU.
-- Add a `dfu_detach` feature: a USB DFU runtime interface whose DETACH reboots into the bootloader, so a dongle or a Vial-only board can be updated with `dfu-util` or rmk-gui without a host protocol. A keyboard honours the DETACH only while the host lock is unlocked (`host_lock` required); a dongle, having no keys, only for 30 s after plug-in.
+- Add a `dfu_detach` feature: a USB DFU runtime interface whose DETACH reboots into the bootloader, so a dongle or a Vial-only board can be updated with `dfu-util` or rmk-gui without a host protocol. With `host_lock` the DETACH is honoured only while the lock is unlocked; a dongle, having no keys, honours it only for 30 s after plug-in.
 - Publish the dongle's state.
 - Add `dfu_ext` feature for DFU writes to external SPI flash (e.g. W25Q64), so boards with limited internal flash can store the new firmware image externally.
 - Publish the dongle's state.

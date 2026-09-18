@@ -249,8 +249,8 @@ zsa_voyager_bl = []
 
 ## Add a USB DFU runtime interface: a DFU_DETACH from the host runs `jump_to_bootloader`,
 ## so any DFU tool (rmk-gui, dfu-util) can reboot the device into its bootloader without a
-## host protocol. A keyboard honours it only while the host lock is unlocked (`host_lock` is
-## required); a dongle, having no keys, only for 30 s after plug-in. Pair with a bootloader feature such as `adafruit_bl`. Not for
+## host protocol. With `host_lock` it is honoured only while the lock is unlocked; a dongle,
+## having no keys, honours it only for 30 s after plug-in. Pair with a bootloader feature such as `adafruit_bl`. Not for
 ## `dfu_rp`/`dfu_nrf`, whose interface already handles DETACH.
 dfu_detach = []
 
