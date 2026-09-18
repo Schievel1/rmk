@@ -54,10 +54,10 @@ pub trait PointingDriver {
         debug!("set_resolution() is not implemented for this sensor.");
         Err(PointingDriverError::NotImplementedError)
     }
-    /// The keyboard went idle (`sleeping`) or woke up. A sensor that is held
-    /// awake for responsiveness should drop that while the keyboard sleeps
-    /// and pick it up again on wake; sensors without such a mode ignore this.
-    async fn on_sleep_state(&mut self, _sleeping: bool) -> Result<(), PointingDriverError> {
+    /// Set low-power mode.
+    /// A pointing driver which has low-power mode should re-implement this function.
+    /// This function is called when the keyboard goes idle(sleep).
+    async fn set_low_power(&mut self, _enabled: bool) -> Result<(), PointingDriverError> {
         Ok(())
     }
 }
@@ -197,8 +197,8 @@ impl<S: PointingDriver> PointingDevice<S> {
         if self.init_state != InitState::Ready {
             return;
         }
-        if let Err(err) = self.sensor.on_sleep_state(e.0).await {
-            debug!("PointingDevice {}: sleep state update failed: {:?}", self.id, err);
+        if let Err(err) = self.sensor.set_low_power(e.0).await {
+            debug!("PointingDevice {}: low power switch failed: {:?}", self.id, err);
         }
     }
 

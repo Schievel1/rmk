@@ -419,15 +419,16 @@ where
     }
 
     /// Release the awake hold while the keyboard sleeps, restore it on wake.
-    async fn on_sleep_state(&mut self, sleeping: bool) -> Result<(), PointingDriverError> {
+    /// Without `force_awake` the sensor manages its own power and this is a no-op.
+    async fn set_low_power(&mut self, enabled: bool) -> Result<(), PointingDriverError> {
         if !self.config.force_awake {
             return Ok(());
         }
         debug!(
             "PMW3610: {} force awake",
-            if sleeping { "releasing" } else { "restoring" }
+            if enabled { "releasing" } else { "restoring" }
         );
-        self.write_force_awake(!sleeping).await
+        self.write_force_awake(!enabled).await
     }
 
     /// Check if motion is pending (motion GPIO is active low)
