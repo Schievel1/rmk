@@ -30,6 +30,9 @@ motion = "P0_02" # Optional. If omitted, the sensor is polled.
 
 report_hz = 125 # Optional: Report rate in Hz
 
+# Hold the sensor awake while the keyboard is awake: no REST wake-up delay
+# between movements, at the cost of RUN current. Released while the keyboard's
+# idle sleep (`split_central_sleep_timeout_seconds`) is active.
 force_awake = false
 smart_mode = true
 cpi = 800

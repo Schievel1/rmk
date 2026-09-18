@@ -126,7 +126,14 @@ pub struct Pmw3610Config {
     pub invert_y: bool,
     /// Swap X and Y axes
     pub swap_xy: bool,
-    /// Force awake mode (disable power saving)
+    /// Hold the sensor in RUN while the keyboard is awake, so it never drops
+    /// into a REST mode between movements: every roll after a pause is seen at
+    /// the full frame rate and sensitivity instead of waiting for a REST
+    /// sample. Costs RUN current the whole time the keyboard is awake. Once
+    /// the keyboard's idle sleep starts (`split_central_sleep_timeout_seconds`)
+    /// the hold is released and the sensor's own REST modes take over until
+    /// activity wakes the keyboard again. Without a sleep timeout it is held
+    /// awake permanently.
     pub force_awake: bool,
     /// Enable smart mode for better tracking on shiny surfaces
     pub smart_mode: bool,
@@ -193,8 +200,8 @@ impl<SPI: SpiBus, CS: OutputPin, MOTION: InputPin + Wait> Pmw3610<SPI, CS, MOTIO
         }
     }
 
-    /// Set force awake mode
-    async fn set_force_awake(&mut self, enable: bool) -> Result<(), PointingDriverError> {
+    /// Write the FMODE bits of the performance register.
+    async fn write_force_awake(&mut self, enable: bool) -> Result<(), PointingDriverError> {
         let mut val = self.read_reg(PMW3610_PERFORMANCE).await?;
         val &= !PERFORMANCE_FMODE_MASK;
         if enable {
@@ -338,7 +345,7 @@ impl<SPI: SpiBus, CS: OutputPin, MOTION: InputPin + Wait> Pmw3610<SPI, CS, MOTIO
                 .map_err(|_| Pmw3610Error::Spi)?;
         }
 
-        self.set_force_awake(self.config.force_awake)
+        self.write_force_awake(self.config.force_awake)
             .await
             .map_err(|_| Pmw3610Error::Spi)?;
 
@@ -416,6 +423,18 @@ where
         }
 
         Ok(MotionData { dx, dy })
+    }
+
+    /// Release the awake hold while the keyboard sleeps, restore it on wake.
+    async fn on_sleep_state(&mut self, sleeping: bool) -> Result<(), PointingDriverError> {
+        if !self.config.force_awake {
+            return Ok(());
+        }
+        debug!(
+            "PMW3610: {} force awake",
+            if sleeping { "releasing" } else { "restoring" }
+        );
+        self.write_force_awake(!sleeping).await
     }
 
     /// Check if motion is pending (motion GPIO is active low)
