@@ -126,14 +126,7 @@ pub struct Pmw3610Config {
     pub invert_y: bool,
     /// Swap X and Y axes
     pub swap_xy: bool,
-    /// Hold the sensor in RUN while the keyboard is awake, so it never drops
-    /// into a REST mode between movements: every roll after a pause is seen at
-    /// the full frame rate and sensitivity instead of waiting for a REST
-    /// sample. Costs RUN current the whole time the keyboard is awake. Once
-    /// the keyboard's idle sleep starts (`split_central_sleep_timeout_seconds`)
-    /// the hold is released and the sensor's own REST modes take over until
-    /// activity wakes the keyboard again. Without a sleep timeout it is held
-    /// awake permanently.
+    /// Force awake mode (disable power saving)
     pub force_awake: bool,
     /// Enable smart mode for better tracking on shiny surfaces
     pub smart_mode: bool,
