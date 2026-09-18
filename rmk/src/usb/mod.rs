@@ -26,7 +26,7 @@ use crate::state::{current_usb_state, set_usb_state};
 
 #[cfg(feature = "_dfu")]
 pub(crate) mod dfu;
-#[cfg(feature = "dfu_detach")]
+#[cfg(feature = "dongle")]
 pub(crate) mod dfu_detach;
 // The Rynk vendor interface serves the keyboard's Rynk session and the dongle's router.
 #[cfg(any(feature = "rynk", all(feature = "dongle", not(feature = "vial"))))]
@@ -176,9 +176,8 @@ const DEFAULT_CONFIG_DESC_SIZE: usize = if cfg!(any(
     feature = "usb_log",
     feature = "steno",
     feature = "_dfu",
-    feature = "dfu_detach",
     feature = "rynk",
-    all(feature = "dongle", not(feature = "vial"))
+    feature = "dongle"
 )) {
     256
 } else {
@@ -228,13 +227,9 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(
     const CONTROL_BUF_SIZE: usize = DEFAULT_CONFIG_DESC_SIZE;
 
     // The rynk MS OS 2.0 descriptor set (WinUSB binding) takes ~178 bytes, the
-    // DFU runtime interface's another 28, and the BOS platform capability 28
-    // on top of the 5-byte BOS header.
-    const WINUSB: bool = cfg!(any(
-        feature = "rynk",
-        feature = "dfu_detach",
-        all(feature = "dongle", not(feature = "vial"))
-    ));
+    // dongle's DFU runtime interface another 28, and the BOS platform
+    // capability 28 on top of the 5-byte BOS header.
+    const WINUSB: bool = cfg!(any(feature = "rynk", feature = "dongle"));
     const BOS_BUF_SIZE: usize = if WINUSB { 64 } else { 16 };
     const MSOS_BUF_SIZE: usize = if WINUSB { 256 } else { 16 };
 
@@ -381,7 +376,7 @@ impl<D: Driver<'static>> UsbTransportBuilder<D> {
         #[cfg(any(feature = "host", feature = "dongle"))]
         let (host_reader, host_writer) = host_usb::build_host_usb(&mut builder);
         // After the vendor interface: whichever comes first writes the MS OS header.
-        #[cfg(feature = "dfu_detach")]
+        #[cfg(feature = "dongle")]
         dfu_detach::register(&mut builder);
 
         Self {

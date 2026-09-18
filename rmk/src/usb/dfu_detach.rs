@@ -20,9 +20,6 @@ use embassy_usb::driver::Driver;
 use embassy_usb::msos;
 use static_cell::StaticCell;
 
-#[cfg(not(feature = "dongle"))]
-compile_error!("`dfu_detach` is for dongles: a keyboard enters its bootloader through its host protocol");
-
 /// Long enough to replug and click; short enough that a host cannot simply
 /// wait for it.
 const PLUG_WINDOW: Duration = Duration::from_secs(30);
