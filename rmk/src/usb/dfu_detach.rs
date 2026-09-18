@@ -2,14 +2,7 @@
 //!
 //! For firmware whose bootloader does the flashing (rmk-boot, Adafruit, or a
 //! single-bank bootloader on a part too small for two slots). The interface
-//! carries no d        #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
-        {
-            self.plugged.is_some_and(|at| at.elapsed() <= PLUG_WINDOW)
-        }
-        #[cfg(not(any(feature = "host_lock", feature = "dongle")))]
-        {
-            true
-        }a — a host that wants to update the device asks it to leave,
+//! carries no data — a host that wants to update the device asks it to leave,
 //! then talks DFU to whatever enumerates next. It needs no host protocol, so it
 //! works on a dongle that only relays Vial, and with `dfu-util` alone.
 //!
@@ -32,11 +25,6 @@ use embassy_usb::driver::Driver;
 use embassy_usb::{Handler, msos};
 use static_cell::StaticCell;
 
-#[cfg(not(any(feature = "host_lock", feature = "dongle")))]
-compile_error!(
-    "`dfu_detach` on a keyboard needs `host_lock`: leaving for the bootloader takes the same unlock as the Rynk bootloader command"
-);
-
 /// `bRequest` of `DFU_DETACH`.
 const REQ_DETACH: u8 = 0;
 /// DFU functional descriptor type, and the class triple of a runtime interface.
@@ -48,8 +36,8 @@ const PROTOCOL_RUNTIME: u8 = 0x01;
 /// `wDetachTimeout`: moot with `WILL_DETACH`, but the descriptor needs one.
 const DETACH_TIMEOUT: Duration = Duration::from_millis(1000);
 
-/// How long after the bus comes up a dongle honours a DETACH. Long enough to replug and click; short enough that a host cannot
-/// simply wait for it.
+/// How long after the bus comes up a dongle honours a DETACH. Long enough to
+/// replug and click; short enough that a host cannot simply wait for it.
 #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
 const PLUG_WINDOW: Duration = Duration::from_secs(30);
 
@@ -75,9 +63,13 @@ impl Gate {
         {
             crate::host::lock::unlocked()
         }
-        #[cfg(not(feature = "host_lock"))]
+        #[cfg(all(feature = "dongle", not(feature = "host_lock")))]
         {
             self.plugged.is_some_and(|at| at.elapsed() <= PLUG_WINDOW)
+        }
+        #[cfg(not(any(feature = "host_lock", feature = "dongle")))]
+        {
+            true
         }
     }
 }
