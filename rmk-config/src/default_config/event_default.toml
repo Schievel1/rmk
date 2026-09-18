@@ -49,7 +49,8 @@ subs = 3
 [event.sleep_state]
 channel_size = 1
 pubs = 1
-subs = 2
+# Each PointingDevice configured in keyboard.toml adds one (build_constants.rs).
+subs = 1
 
 # Power events
 [event.battery_status]

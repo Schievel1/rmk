@@ -73,6 +73,24 @@ pub struct Passkey {
 }
 
 impl crate::KeyboardTomlConfig {
+    /// PointingDevices on the busiest board: a binary carries one board's devices.
+    fn pointing_device_count(&self) -> usize {
+        fn count(input_device: Option<&crate::InputDeviceConfig>) -> usize {
+            input_device
+                .map(|d| d.pmw3610.as_ref().map_or(0, |v| v.len()) + d.pmw33xx.as_ref().map_or(0, |v| v.len()))
+                .unwrap_or(0)
+        }
+        let boards = self.split.iter().flat_map(|split| {
+            core::iter::once(split.central.input_device.as_ref())
+                .chain(split.peripheral.iter().map(|p| p.input_device.as_ref()))
+        });
+        core::iter::once(self.input_device.as_ref())
+            .chain(boards)
+            .map(count)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Build compile-time constants from the configuration.
     ///
     /// `active_features` contains feature names enabled on the
@@ -168,6 +186,15 @@ impl crate::KeyboardTomlConfig {
         // Auto-bump subscriber counts based on enabled feature flags.
         // Declarations live in subscriber_default.toml.
         apply_feature_subscriber_bumps(&mut events, active_features);
+
+        // Each PointingDevice subscribes to the sleep state. Devices built by
+        // hand in Rust are declared under `[event.sleep_state]` instead.
+        let pointing_devices = self.pointing_device_count();
+        if pointing_devices > 0
+            && let Some(event) = events.iter_mut().find(|event| event.name == "sleep_state")
+        {
+            event.subs += pointing_devices;
+        }
 
         // Every link subscribes to the outgoing queue, so a central needs one
         // slot per split peripheral on top of its link toward the dongle.
@@ -377,6 +404,46 @@ mod tests {
         // Nobody listens on a screenless dongle, so publishing there is a no-op.
         assert_eq!(subs(&["dongle", "_ble", "storage"]), 0);
         assert_eq!(subs(&["dongle", "display", "_ble", "storage"]), 1);
+    }
+
+    #[test]
+    fn each_configured_pointing_device_reserves_a_sleep_state_subscriber() {
+        use crate::{InputDeviceConfig, Pmw3610Config};
+        let subs = |config: &KeyboardTomlConfig| {
+            config
+                .build_constants(&[])
+                .unwrap()
+                .events
+                .into_iter()
+                .find(|event| event.name == "sleep_state")
+                .unwrap()
+                .subs
+        };
+        let sensors = |n: usize| {
+            Some(InputDeviceConfig {
+                pmw3610: Some(vec![Pmw3610Config::default(); n]),
+                ..Default::default()
+            })
+        };
+        let mut config: KeyboardTomlConfig = toml::from_str("").unwrap();
+        let base = subs(&config);
+        config.input_device = sensors(1);
+        assert_eq!(subs(&config), base + 1);
+        // A split binary carries one board's devices: one on the central and
+        // two on a peripheral reserve two, not three.
+        config.input_device = None;
+        config.split = Some(SplitConfig {
+            central: SplitBoardConfig {
+                input_device: sensors(1),
+                ..Default::default()
+            },
+            peripheral: vec![SplitBoardConfig {
+                input_device: sensors(2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(subs(&config), base + 2);
     }
 
     #[test]
