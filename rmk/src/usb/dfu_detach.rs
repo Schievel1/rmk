@@ -1,27 +1,17 @@
-//! A USB DFU runtime interface for dongles: `DFU_DETACH` reboots into the
-//! bootloader.
+//! USB DFU runtime interface for dongles: `DFU_DETACH` reboots into the bootloader.
 //!
-//! A dongle relays its keyboard's host protocol, so the Rynk and Vial
-//! bootloader commands never reach it; and with one flash slot it cannot take
-//! a download itself. This interface carries no data — a host that wants to
-//! update the dongle asks it to leave, then talks DFU to the bootloader that
-//! enumerates next. `dfu-util` and rmk-gui both speak it.
-//!
-//! A bootloader flashes whatever it is given, so leaving for it needs proof
-//! that someone is there. A dongle has no keys, but being bus-powered it boots
-//! when plugged in: the DETACH is honoured only in the first seconds after
-//! boot. Later ones are simply not acted on; the host sees the dongle stay.
+//! A dongle relays its keyboard's host protocol, so the Rynk/Vial bootloader
+//! commands never reach it; this interface is how `dfu-util` and rmk-gui ask it
+//! to leave. Having no keys, it honours the DETACH only for 30 s after plug-in.
 
 use embassy_time::{Duration, Instant};
-use embassy_usb::Builder;
 use embassy_usb::class::dfu::app_mode::{self, DfuState};
 use embassy_usb::class::dfu::consts::DfuAttributes;
 use embassy_usb::driver::Driver;
-use embassy_usb::msos;
+use embassy_usb::{Builder, msos};
 use static_cell::StaticCell;
 
-/// Long enough to replug and click; short enough that a host cannot simply
-/// wait for it.
+/// Bus-powered, so boot time is plug-in time.
 const PLUG_WINDOW: Duration = Duration::from_secs(30);
 
 struct Detach;
@@ -37,14 +27,12 @@ impl app_mode::Handler for Detach {
 }
 
 pub(crate) fn register<D: Driver<'static>>(builder: &mut Builder<'static, D>) {
-    // The vendor interface writes the MS OS 2.0 header when it is present;
-    // without it (a Vial dongle) this interface is the first to need one.
+    // A Vial dongle has no vendor interface to write the MS OS 2.0 header first.
     if builder.msos_writer().is_empty() {
         builder.msos_descriptor(msos::windows_version::WIN8_1, super::MSOS_VENDOR_CODE);
     }
     static STATE: StaticCell<DfuState<Detach>> = StaticCell::new();
-    // `WILL_DETACH`: the dongle resets itself on DETACH rather than waiting for
-    // the host's bus reset, which neither WebUSB nor nusb on Windows can issue.
+    // `WILL_DETACH`: reset on DETACH itself; WebUSB and nusb on Windows cannot bus-reset.
     let state = STATE.init(DfuState::new(
         Detach,
         DfuAttributes::CAN_DOWNLOAD | DfuAttributes::WILL_DETACH,
