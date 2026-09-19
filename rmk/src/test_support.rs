@@ -30,25 +30,14 @@ pub fn reset_connection_status() {
 
 #[cfg(feature = "storage")]
 pub fn clear_flash_channel() {
-    crate::storage::FLASH_CHANNEL.clear();
-    crate::storage::REPLY.reset();
+    crate::storage::clear_flash_channel();
 }
 
 /// Stand-in for the storage task when a simulation has no flash: every write
 /// lands, every read is absent, so nothing blocks on a never-serviced queue.
 pub async fn drain_flash_channel() {
     #[cfg(feature = "storage")]
-    {
-        use crate::storage::{FLASH_CHANNEL, FlashOperationMessage, REPLY};
-        loop {
-            match FLASH_CHANNEL.receive().await {
-                FlashOperationMessage::Read(_, t) | FlashOperationMessage::Store(_, Some(t)) => {
-                    REPLY.signal((t, Ok(None)))
-                }
-                _ => {}
-            }
-        }
-    }
+    crate::storage::drain_flash_channel().await;
     #[cfg(not(feature = "storage"))]
     core::future::pending::<()>().await
 }

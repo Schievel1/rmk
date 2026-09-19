@@ -36,85 +36,78 @@ use crate::split::ble::PeerAddress;
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub(crate) enum FlashOperationMessage {
-    /// `Some(ticket)` is answered once the write has landed; `None` is fire-and-forget
-    /// and the runner only logs a failure.
+    /// Save a [`StorageItem`] to the storage.
+    /// `Some(id)` is answered once the write lands; `None` is fire-and-forget.
     Store(StorageItem, Option<u8>),
+    /// Read a stored value by [`StorageKey`].
     /// Answered once on `REPLY` after every earlier message (FIFO).
     Read(StorageKey, u8),
-    /// `erase_all` + reboot; never answered.
+    /// Fully erase and reset the storage.
     Reset,
 }
 
-pub(crate) type Reply = Result<Option<StorageData>, ()>;
+// Requests to the storage task. Send through `store`/`store_unchecked`/`read`/`reset`.
+static FLASH_CHANNEL: Channel<crate::RawMutex, FlashOperationMessage, { crate::FLASH_CHANNEL_SIZE }> = Channel::new();
+/// The in-flight request's id: the lock hands it out and holds it until the reply arrives,
+/// so only one request waits on `REPLY` at a time.
+static REQUEST_ID: Mutex<crate::RawMutex, u8> = Mutex::new(0);
+/// Storage's reply of a request, `(request id, reply)`.
+static REPLY: Signal<crate::RawMutex, (u8, Result<Option<StorageData>, ()>)> = Signal::new();
 
-// Firmware code goes through `store`/`store_unchecked`/`read`/`reset`; `test_support` stands in for the task.
-pub(crate) static FLASH_CHANNEL: Channel<crate::RawMutex, FlashOperationMessage, { crate::FLASH_CHANNEL_SIZE }> =
-    Channel::new();
-/// One ticketed request in flight: the lock is the turn, its value is the ticket counter.
-static TURN: Mutex<crate::RawMutex, u8> = Mutex::new(0);
-/// `(ticket, reply)`.
-pub(crate) static REPLY: Signal<crate::RawMutex, (u8, Reply)> = Signal::new();
-
-async fn request(build: impl FnOnce(u8) -> FlashOperationMessage) -> Reply {
-    let mut turn = TURN.lock().await;
-    *turn = turn.wrapping_add(1);
-    let ticket = *turn;
-    FLASH_CHANNEL.send(build(ticket)).await;
-    // A predecessor cancelled after `send` leaves its reply in the slot first: skip it by ticket.
+/// Request the storage.
+/// For `Store`, it returns the result of the store. And for `Read`, it returns the requested item.
+async fn request(build: impl FnOnce(u8) -> FlashOperationMessage) -> Result<Option<StorageData>, ()> {
+    let mut id = REQUEST_ID.lock().await;
+    *id = id.wrapping_add(1);
+    FLASH_CHANNEL.send(build(*id)).await;
+    // A predecessor cancelled after `send` leaves its reply in the slot first: skip it by id.
     loop {
-        let (t, reply) = REPLY.wait().await;
-        if t == ticket {
+        let (replied, reply) = REPLY.wait().await;
+        if replied == *id {
             return reply;
         }
     }
 }
 
-/// Write `item` and report whether it landed. Returns once the write is on flash.
+/// Write `item`, returning once it has landed on flash.
 pub(crate) async fn store(item: StorageItem) -> Result<(), ()> {
-    request(|t| FlashOperationMessage::Store(item, Some(t)))
+    request(|id| FlashOperationMessage::Store(item, Some(id)))
         .await
         .map(|_| ())
 }
 
-/// Write `item` without waiting for the outcome; a failure only reaches the log.
-/// Not `async fn`: that would keep `item` alive beside the message inside the future.
+/// Write `item` without waiting for the result.
 pub(crate) fn store_unchecked(item: StorageItem) -> impl Future<Output = ()> {
     FLASH_CHANNEL.send(FlashOperationMessage::Store(item, None))
 }
 
-pub(crate) async fn read(key: StorageKey) -> Reply {
-    request(|t| FlashOperationMessage::Read(key, t)).await
+/// Read a stored item.
+pub(crate) async fn read(key: StorageKey) -> Result<Option<StorageData>, ()> {
+    request(|id| FlashOperationMessage::Read(key, id)).await
 }
 
-/// Erase everything and reboot.
+/// Erase everything and reboot. Fire and forget.
 pub(crate) async fn reset() {
     FLASH_CHANNEL.send(FlashOperationMessage::Reset).await
 }
 
-/// The most one user slot holds. Changing it is a format change, so the next
-/// firmware reinitializes the storage on its own (see `Storage::firmware`).
+/// The most one user slot holds. Changing it reframes stored values, but the new
+/// commit also changes `Storage::schema`, so the next boot reinitializes on its own.
 pub const USER_DATA_MAX_SIZE: usize = 16;
 
-/// Bytes a board persists for itself. RMK never looks inside one.
-pub type UserData = heapless::Vec<u8, USER_DATA_MAX_SIZE>;
-
-/// Persist `bytes` in board-defined slot `slot`, replacing whatever was there.
-///
-/// For state a board owns and RMK has no concept of — a trackball's learned
-/// orientation, a mode the board invented. The write is unchecked, so a flash
-/// failure reaches the log and not the caller.
+/// Persist user-defined `bytes` in board-defined slot `slot`. RMK never looks inside one.
 ///
 /// `Err` when `bytes` is longer than [`USER_DATA_MAX_SIZE`].
 pub async fn store_user_data(slot: u8, bytes: &[u8]) -> Result<(), heapless::CapacityError> {
-    let data = UserData::from_slice(bytes)?;
+    let data = heapless::Vec::from_slice(bytes)?;
     store_unchecked(StorageItem::UserData { slot, data }).await;
     Ok(())
 }
 
 /// Read back slot `slot`, `None` if nothing was ever stored there.
 ///
-/// The storage task answers this, so it only works once `Storage` is running.
-pub async fn read_user_data(slot: u8) -> Option<UserData> {
+/// Answered by the storage task, so it only works once `Storage` is running.
+pub async fn read_user_data(slot: u8) -> Option<heapless::Vec<u8, USER_DATA_MAX_SIZE>> {
     match read(StorageKey::UserData(slot)).await {
         Ok(Some(StorageData::UserData(data))) => Some(data),
         _ => None,
@@ -158,8 +151,8 @@ pub(crate) enum StorageKey {
     UserData(u8),
 }
 
-/// What a writer stores: the key and its value in one piece, so they cannot be mismatched.
-/// `split` is the only place that maps it onto the on-flash `StorageKey`/`StorageData` pair.
+/// What a writer stores: key and value in one piece, so they cannot be mismatched.
+/// `split` is the only place that maps it onto the on-flash key/value pair.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub(crate) enum StorageItem {
@@ -209,7 +202,7 @@ pub(crate) enum StorageItem {
     ActiveBleProfile(u8),
     UserData {
         slot: u8,
-        data: UserData,
+        data: heapless::Vec<u8, USER_DATA_MAX_SIZE>,
     },
 }
 
@@ -300,7 +293,7 @@ pub(crate) enum StorageData {
     BondInfo(ProfileInfo),
     #[cfg(feature = "_ble")]
     ActiveBleProfile(u8),
-    UserData(UserData),
+    UserData(heapless::Vec<u8, USER_DATA_MAX_SIZE>),
 }
 
 impl<'a> PostcardValue<'a> for StorageData {}
@@ -308,25 +301,19 @@ impl<'a> PostcardValue<'a> for StorageData {}
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct BehaviorConfig {
-    // The prior-idle-time in ms used for in flow tap
+    // Timeouts and intervals are stored as milliseconds.
     pub(crate) prior_idle_time: u16,
-    // Default morse profile containing mode, timeouts, and unilateral_tap settings
     pub(crate) morse_default_profile: MorseProfile,
-
-    // Timeout time for combos
     pub(crate) combo_timeout: u16,
-    // Timeout time for one-shot keys
     pub(crate) one_shot_timeout: u16,
-    // Interval for tap actions
     pub(crate) tap_interval: u16,
-    // Interval for tapping capslock.
-    // macOS has special processing of capslock, when tapping capslock, the tap interval should be another value
+    // macOS treats capslock specially, so tapping it needs its own interval
     pub(crate) tap_capslock_interval: u16,
 }
 
 impl From<&config::BehaviorConfig> for BehaviorConfig {
     fn from(behavior: &config::BehaviorConfig) -> Self {
-        // Note: default_layer persists under its own key (restored in read_keymap), not this struct.
+        // default_layer persists under its own key (restored in `read_keymap`), not here.
         Self {
             prior_idle_time: behavior.morse.prior_idle_time.as_millis() as u16,
             morse_default_profile: behavior.morse.default_profile,
@@ -342,9 +329,8 @@ pub fn async_flash_wrapper<F: NorFlash>(flash: F) -> BlockingAsync<F> {
     embassy_embedded_hal::adapter::BlockingAsync::new(flash)
 }
 
-/// Storage for the firmwares that hold no keymap of their own — a split
-/// peripheral and a dongle. Both still persist their BLE bonds, which the
-/// profile manager loads over `FLASH_CHANNEL`.
+/// Storage for the firmwares that hold no keymap of their own, a split peripheral and a
+/// dongle. Both still persist BLE bonds, which the profile manager loads over `FLASH_CHANNEL`.
 #[cfg(any(feature = "split", feature = "dongle"))]
 pub async fn new_storage_without_keymap<F: AsyncNorFlash>(
     flash: F,
@@ -362,12 +348,6 @@ pub async fn new_storage_without_keymap<F: AsyncNorFlash>(
     .await
 }
 
-/// Page caches make every store O(1) in page lookups; the key cache serves runtime
-/// reads and the per-item lookups of a page migration. 32 page slots cover every
-/// chip default (pages beyond run uncached); 32 key slots (8 B each) cover the
-/// runtime readers, not a whole keymap.
-type StorageCache = Cache<CalculatedPageStates, ArrayPagePointers<32>, ArrayKeyPointers<StorageKey, 32>, StorageKey>;
-
 pub struct Storage<
     F: AsyncNorFlash,
     const ROW: usize,
@@ -375,22 +355,27 @@ pub struct Storage<
     const NUM_LAYER: usize,
     const NUM_ENCODER: usize = 0,
 > {
-    pub(crate) flash: MapStorage<StorageKey, F, StorageCache>,
+    /// Page pointers keep a store O(1) in page lookups, the key pointers serve runtime reads
+    /// and page migrations. 32 page slots cover every chip default (pages beyond run uncached);
+    /// 32 key slots (8 B each) cover the runtime readers, not a whole keymap.
+    pub(crate) flash: MapStorage<
+        StorageKey,
+        F,
+        Cache<CalculatedPageStates, ArrayPagePointers<32>, ArrayKeyPointers<StorageKey, 32>, StorageKey>,
+    >,
     pub(crate) buffer: [u8; get_buffer_size()],
-    /// FNV-1a over what decides whether stored bytes can be read back at all: the rmk
-    /// version, its commit, and the feature set that gates the two enums' variants. A
-    /// mismatch means an item could decode as the wrong variant, so the storage is erased.
+    /// FNV-1a over everything that frames stored bytes: rmk version, commit and features.
+    /// A mismatch could decode an item as the wrong variant, so the storage is erased.
     pub(crate) schema: u32,
-    /// FNV-1a over the compiled-in layout: geometry, keymap, encoder map, behavior
-    /// defaults, combos, forks, morses and macros. A mismatch rewrites only what the
-    /// layout owns, so a keymap edited in source shows up without dropping pairings.
+    /// FNV-1a over the compiled-in layout: geometry, keymap, encoder map, behavior defaults,
+    /// combos, forks, morses and macros. A mismatch rewrites only those items, keeping pairings.
     pub(crate) layout: u32,
 }
 
 impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
     Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
 {
-    pub(crate) async fn fetch(&mut self, key: StorageKey) -> Reply {
+    pub(crate) async fn fetch(&mut self, key: StorageKey) -> Result<Option<StorageData>, ()> {
         self.flash
             .fetch_item(&mut self.buffer, &key)
             .await
@@ -420,8 +405,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             "Number of used sector for storage must larger than 1"
         );
 
-        // `start_addr == 0` means the last `num_sectors` sectors, except on nRF BLE builds
-        // without DFU, which keep the historical 0x6_0000; with DFU the partition is placed by rmk-boot.
+        // `start_addr == 0` means the last `num_sectors` sectors, except on nRF BLE builds without
+        // DFU, which keep the historical 0x6_0000; with DFU rmk-boot places the partition.
         #[cfg(all(feature = "_nrf_ble", not(feature = "_dfu")))]
         let start_addr = if storage_config.start_addr == 0 {
             0x0006_0000
@@ -518,16 +503,13 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 
         if wipe {
             debug!("Clearing storage!");
-            // The probe taught the cache the old page layout and an erase never touches a
-            // cache, so the map is rebuilt with a fresh one over the erased range.
-            // Nothing is written back: with the range erased every read misses and the
-            // compiled-in defaults already in RAM stand.
+            // An erase never invalidates the cache the probing `fetch` filled, so rebuild the map
+            // with a fresh one. Nothing is written back: reads now miss and the RAM defaults stand.
             let (mut raw, _) = storage.flash.destroy();
             let _ = raw.erase(storage_range.start, storage_range.end).await;
             storage.flash = MapStorage::new(raw, MapConfig::new(storage_range), cache());
         } else if relayout {
-            // Only the layout changed, so its items are overwritten where they lie and
-            // everything else — pairings, connection type, user slots — is left alone.
+            // Pairings, connection type and user slots are left alone.
             debug!("Layout changed, rewriting the items it owns.");
             #[cfg(feature = "host")]
             storage.write_layout(keymap, encoder_map, behavior_config).await;
@@ -562,9 +544,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         Ok(())
     }
 
-    /// Overwrite every item the layout owns with the compiled-in defaults, so a value a
-    /// host wrote earlier stops shadowing what was flashed. Only reached when nothing was
-    /// erased; the caller records the new hashes afterwards.
+    /// Overwrite every item the layout owns with the compiled-in defaults, so a value a host
+    /// wrote earlier stops shadowing what was flashed. The caller records the new hashes after.
     #[cfg(feature = "host")]
     async fn write_layout(
         &mut self,
@@ -634,15 +615,15 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 {
     async fn run(&mut self) -> ! {
         loop {
-            let (ticket, result) = match FLASH_CHANNEL.receive().await {
+            let (id, result) = match FLASH_CHANNEL.receive().await {
                 FlashOperationMessage::Store(item, ack) => {
                     let result = self.put(item).await.map(|_| None).map_err(print_storage_error::<F>);
                     match ack {
-                        Some(ticket) => (ticket, result),
+                        Some(id) => (id, result),
                         None => continue,
                     }
                 }
-                FlashOperationMessage::Read(key, ticket) => (ticket, self.fetch(key).await),
+                FlashOperationMessage::Read(key, id) => (id, self.fetch(key).await),
                 FlashOperationMessage::Reset => {
                     let _ = self.flash.erase_all().await;
                     reboot_keyboard();
@@ -650,7 +631,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     core::future::pending().await
                 }
             };
-            REPLY.signal((ticket, result));
+            REPLY.signal((id, result));
         }
     }
 }
@@ -674,8 +655,8 @@ pub(crate) fn print_storage_error<F: AsyncNorFlash>(e: SSError<F::Error>) {
 const fn get_buffer_size() -> usize {
     #[cfg(feature = "host")]
     {
-        // The largest item is the macro buffer plus its framing; `sequential-storage`
-        // wants 32-byte alignment on some flashes, so always round up.
+        // The largest item is the macro buffer plus its framing, rounded up because
+        // `sequential-storage` wants 32-byte alignment on some flashes.
         let buffer_size = if crate::MACRO_SPACE_SIZE < 248 {
             256
         } else {
@@ -686,6 +667,27 @@ const fn get_buffer_size() -> usize {
 
     #[cfg(not(feature = "host"))]
     256
+}
+
+/// Test-only: forget queued requests and any pending reply, so a test starts clean.
+#[cfg(any(test, feature = "std"))]
+pub(crate) fn clear_flash_channel() {
+    FLASH_CHANNEL.clear();
+    REPLY.reset();
+}
+
+/// Test-only stand-in for the storage task when a simulation has no flash: every
+/// write lands, every read is absent, so nothing blocks on a never-serviced queue.
+#[cfg(any(test, feature = "std"))]
+pub(crate) async fn drain_flash_channel() {
+    loop {
+        match FLASH_CHANNEL.receive().await {
+            FlashOperationMessage::Read(_, id) | FlashOperationMessage::Store(_, Some(id)) => {
+                REPLY.signal((id, Ok(None)))
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -715,25 +717,22 @@ mod tests {
         }
     }
 
-    struct TestFlash<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> {
-        bytes: [u8; SIZE],
+    /// 16 KB of byte-writable flash in 4 KB sectors, the geometry `STORAGE_RANGE` is cut from.
+    struct TestFlash {
+        bytes: [u8; 16_384],
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE> {
+    impl TestFlash {
         fn new() -> Self {
-            Self { bytes: [0xFF; SIZE] }
+            Self { bytes: [0xFF; 16_384] }
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::ErrorType
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
-    {
+    impl embedded_storage::nor_flash::ErrorType for TestFlash {
         type Error = TestFlashError;
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::ReadNorFlash
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
-    {
+    impl embedded_storage::nor_flash::ReadNorFlash for TestFlash {
         const READ_SIZE: usize = 1;
 
         fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
@@ -744,15 +743,13 @@ mod tests {
         }
 
         fn capacity(&self) -> usize {
-            SIZE
+            self.bytes.len()
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::NorFlash
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
-    {
-        const WRITE_SIZE: usize = WRITE_SIZE;
-        const ERASE_SIZE: usize = ERASE_SIZE;
+    impl embedded_storage::nor_flash::NorFlash for TestFlash {
+        const WRITE_SIZE: usize = 1;
+        const ERASE_SIZE: usize = 4_096;
 
         fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
             self.bytes[from as usize..to as usize].fill(0xFF);
@@ -772,9 +769,7 @@ mod tests {
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
-        embedded_storage_async::nor_flash::ReadNorFlash for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
-    {
+    impl embedded_storage_async::nor_flash::ReadNorFlash for TestFlash {
         const READ_SIZE: usize = 1;
 
         async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
@@ -782,15 +777,13 @@ mod tests {
         }
 
         fn capacity(&self) -> usize {
-            SIZE
+            self.bytes.len()
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
-        embedded_storage_async::nor_flash::NorFlash for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
-    {
-        const WRITE_SIZE: usize = WRITE_SIZE;
-        const ERASE_SIZE: usize = ERASE_SIZE;
+    impl embedded_storage_async::nor_flash::NorFlash for TestFlash {
+        const WRITE_SIZE: usize = 1;
+        const ERASE_SIZE: usize = 4_096;
 
         async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
             embedded_storage::nor_flash::NorFlash::erase(self, from, to)
@@ -801,12 +794,12 @@ mod tests {
         }
     }
 
-    // The primitive tests below poll by hand: `test_block_on` re-polls with a noop
-    // waker every step, so it would also pass a primitive that loses wake-ups.
-    fn take_ticket() -> u8 {
+    // The primitive tests below poll by hand: `test_block_on` re-polls with a noop waker
+    // every step, so it would also pass a primitive that loses wake-ups.
+    fn take_request_id() -> u8 {
         match FLASH_CHANNEL.try_receive() {
-            Ok(FlashOperationMessage::Read(_, t)) | Ok(FlashOperationMessage::Store(_, Some(t))) => t,
-            other => panic!("expected a ticketed request, got {other:?}"),
+            Ok(FlashOperationMessage::Read(_, id)) | Ok(FlashOperationMessage::Store(_, Some(id))) => id,
+            other => panic!("expected a request that wants a reply, got {other:?}"),
         }
     }
 
@@ -818,13 +811,13 @@ mod tests {
         let stale = {
             let mut first = pin!(read(StorageKey::StorageConfig));
             assert!(first.as_mut().poll(&mut cx).is_pending());
-            take_ticket()
-            // Dropped after `send`: the turn is released, the reply still arrives.
+            take_request_id()
+            // Dropped after `send`: the lock is released, the reply still arrives.
         };
 
         let mut second = pin!(read(StorageKey::StorageConfig));
         assert!(second.as_mut().poll(&mut cx).is_pending());
-        let live = take_ticket();
+        let live = take_request_id();
         assert_ne!(stale, live);
 
         REPLY.signal((stale, Ok(None)));
@@ -834,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn second_requester_waits_for_the_turn() {
+    fn second_requester_waits_for_the_first_reply() {
         let mut cx = Context::from_waker(Waker::noop());
         crate::test_support::clear_flash_channel();
 
@@ -842,11 +835,11 @@ mod tests {
         let mut second = pin!(store(StorageItem::LayoutOption(1)));
         assert!(first.as_mut().poll(&mut cx).is_pending());
         assert!(second.as_mut().poll(&mut cx).is_pending());
-        // Only the turn holder's message is in flight.
-        let ticket = take_ticket();
+        // Only the lock holder's message is in flight.
+        let id = take_request_id();
         assert!(FLASH_CHANNEL.try_receive().is_err());
 
-        REPLY.signal((ticket, Ok(None)));
+        REPLY.signal((id, Ok(None)));
         assert!(matches!(first.as_mut().poll(&mut cx), Poll::Ready(Ok(None))));
         assert!(second.as_mut().poll(&mut cx).is_pending());
         assert!(matches!(
@@ -872,23 +865,21 @@ mod tests {
             FLASH_CHANNEL.try_receive(),
             Ok(FlashOperationMessage::Store(StorageItem::LayoutOption(42), None))
         ));
-        let ticket = match FLASH_CHANNEL.try_receive() {
-            Ok(FlashOperationMessage::Store(StorageItem::PeerAddress(_), Some(t))) => t,
+        let id = match FLASH_CHANNEL.try_receive() {
+            Ok(FlashOperationMessage::Store(StorageItem::PeerAddress(_), Some(id))) => id,
             other => panic!("expected the peer address write, got {other:?}"),
         };
         assert!(write.as_mut().poll(&mut cx).is_pending());
-        REPLY.signal((ticket, Ok(None)));
+        REPLY.signal((id, Ok(None)));
         assert!(matches!(write.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
     }
 
-    type Flash = TestFlash<16_384, 4_096, 1>;
-
     // Boxed: `TestFlash` is 16 KB by value and the `new` future copies it several times.
-    async fn new_storage(flash: Flash) -> Storage<Flash, 1, 1, 1, 0> {
+    async fn new_storage(flash: TestFlash) -> Storage<TestFlash, 1, 1, 1, 0> {
         #[cfg(feature = "host")]
         return new_storage_with_keymap(flash, [[[KeyAction::No; 1]; 1]; 1]).await;
         #[cfg(not(feature = "host"))]
-        Box::pin(Storage::<Flash, 1, 1, 1, 0>::new(
+        Box::pin(Storage::<TestFlash, 1, 1, 1, 0>::new(
             flash,
             &RuntimeStorageConfig::default(),
             &RuntimeBehaviorConfig::default(),
@@ -897,9 +888,12 @@ mod tests {
     }
 
     #[cfg(feature = "host")]
-    async fn new_storage_with_keymap(flash: Flash, keymap: [[[KeyAction; 1]; 1]; 1]) -> Storage<Flash, 1, 1, 1, 0> {
+    async fn new_storage_with_keymap(
+        flash: TestFlash,
+        keymap: [[[KeyAction; 1]; 1]; 1],
+    ) -> Storage<TestFlash, 1, 1, 1, 0> {
         let encoder_map: Option<&mut [[EncoderAction; 0]; 1]> = None;
-        Box::pin(Storage::<Flash, 1, 1, 1, 0>::new(
+        Box::pin(Storage::<TestFlash, 1, 1, 1, 0>::new(
             flash,
             &keymap,
             &encoder_map,
@@ -915,9 +909,9 @@ mod tests {
     const STORAGE_RANGE: core::ops::Range<u32> = (16_384 - 2 * 4_096) as u32..16_384u32;
 
     /// A flash holding `items`, written by an uncached map so `Storage::new` boots over them.
-    async fn seeded(items: &[(StorageKey, StorageData)]) -> Flash {
+    async fn seeded(items: &[(StorageKey, StorageData)]) -> TestFlash {
         let mut map =
-            MapStorage::<StorageKey, _, _>::new(Flash::new(), MapConfig::new(STORAGE_RANGE), Cache::new_uncached());
+            MapStorage::<StorageKey, _, _>::new(TestFlash::new(), MapConfig::new(STORAGE_RANGE), Cache::new_uncached());
         let mut buffer = [0u8; 256];
         for (key, data) in items {
             map.store_item(&mut buffer, key, data).await.unwrap();
@@ -932,7 +926,7 @@ mod tests {
         crate::test_support::clear_flash_channel();
         FAIL_WRITES.store(false, Ordering::Relaxed);
         block_on(async {
-            let mut storage = new_storage(Flash::new()).await;
+            let mut storage = new_storage(TestFlash::new()).await;
             match select(storage.run(), body).await {
                 Either::First(never) => never,
                 Either::Second(out) => out,
@@ -989,9 +983,8 @@ mod tests {
         });
     }
 
-    // Without the rebuild in `Storage::new`, the cache still describes the page
-    // layout the probe saw before the erase and the first store lands in a page
-    // whose marker is gone: an uncached map over the same bytes cannot see it.
+    // Without the rebuild in `Storage::new`, the cache still describes the pre-erase page layout
+    // and the first store lands in a page whose marker is gone, invisible to an uncached map.
     #[test]
     fn reinit_writes_survive_a_fresh_map() {
         block_on(async {
@@ -1054,10 +1047,9 @@ mod tests {
         });
     }
 
-    /// The same firmware keeps a keymap edit across `Storage::new`; a firmware with
-    /// another compiled-in keymap overwrites it, so the flashed keymap is never shadowed.
-    /// Only the layout changed, so the connection type — and with it a real board's
-    /// pairings — survives.
+    /// The same firmware keeps a keymap edit across `Storage::new`; a firmware with another
+    /// compiled-in keymap overwrites it, so the flashed keymap is never shadowed. Only the
+    /// layout changed, so the connection type, and with it a real board's pairings, survives.
     #[cfg(feature = "host")]
     #[test]
     fn keymap_change_reinitializes_storage() {
@@ -1073,7 +1065,7 @@ mod tests {
         let b = KeyAction::Single(Action::Key(KeyCode::Hid(HidKeyCode::B)));
 
         block_on(async {
-            let mut storage = new_storage(Flash::new()).await;
+            let mut storage = new_storage(TestFlash::new()).await;
             storage
                 .put(StorageItem::Keymap {
                     layer: 0,
@@ -1108,9 +1100,8 @@ mod tests {
         });
     }
 
-    // Postcard tags are declaration positions: inserting or reordering a variant
-    // shifts every later tag and misreads storage written by the same commit.
-    // Both enums are append-only within a commit.
+    // Postcard tags are declaration positions: inserting or reordering a variant shifts every
+    // later tag and misreads storage written by the same commit. Both enums are append-only.
     #[test]
     fn storage_variant_order_is_pinned() {
         use sequential_storage::map::Value;
@@ -1183,9 +1174,8 @@ mod tests {
         }
     }
 
-    // A stored LayoutOption must reach the Vial GUI after a power cycle: `read_keymap`
-    // restores it into `KeymapData` and `KeyMap::new` copies it into the state
-    // `GetKeyboardValue` answers from. Drop either step and this reads 0.
+    // A stored LayoutOption must reach the Vial GUI after a power cycle: `read_keymap` restores it
+    // into `KeymapData`, `KeyMap::new` copies it where `GetKeyboardValue` reads. Drop either, get 0.
     #[cfg(feature = "vial")]
     #[test]
     fn layout_option_restored_from_storage() {
@@ -1194,7 +1184,7 @@ mod tests {
 
         block_on(async {
             // A matching config item keeps the stored records across the boot.
-            let stored = new_storage(Flash::new()).await;
+            let stored = new_storage(TestFlash::new()).await;
             let (schema, layout) = (stored.schema, stored.layout);
             let flash = seeded(&[
                 (StorageKey::StorageConfig, StorageData::StorageConfig { schema, layout }),
