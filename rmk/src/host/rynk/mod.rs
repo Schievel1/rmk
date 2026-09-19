@@ -77,9 +77,6 @@ impl<'a> RynkService<'a> {
 
     /// Serve one inbound message: on success the reply frame replaces the
     /// payload in place; on error the caller answers with the error envelope.
-    ///
-    /// A command that needs a storage write is answered only once that write
-    /// has landed, so handlers never have to remember to wait for storage.
     async fn dispatch(&self, locker: &HostLock<'_>, msg: &mut RynkMessage<'_>) -> Result<(), RynkError> {
         let cmd = msg.header().cmd;
 
@@ -87,7 +84,7 @@ impl<'a> RynkService<'a> {
             return Err(RynkError::Locked);
         }
 
-        let served = match cmd {
+        match cmd {
             Cmd::GetVersion => serve::<command::GetVersion, _>(self, msg).await,
             Cmd::GetCapabilities => serve::<command::GetCapabilities, _>(self, msg).await,
             Cmd::Reboot => serve::<command::Reboot, _>(self, msg).await,
@@ -147,12 +144,7 @@ impl<'a> RynkService<'a> {
             Cmd::GetLayout => serve::<command::GetLayout, _>(self, msg).await,
 
             _ => Err(RynkError::UnknownCmd),
-        };
-        #[cfg(feature = "storage")]
-        if served.is_ok() && Self::needs_storage_write(cmd) && !crate::storage::flush().await {
-            return Err(RynkError::StorageFault);
         }
-        served
     }
 
     /// Drive one rynk session based on embedded-io `rx`/`tx`.

@@ -33,7 +33,7 @@ pub struct KeymapData<const ROW: usize, const COL: usize, const NUM_LAYER: usize
     layer_cache: [[u8; COL]; ROW],
     /// Layer cache for encoder directions
     encoder_layer_cache: [[u8; 2]; NUM_ENCODER],
-    /// VIA/Vial layout options; persisted via `LayoutConfig`
+    /// VIA/Vial layout options; persisted via `LayoutOption`
     pub(crate) layout_option: u32,
 }
 
@@ -106,7 +106,7 @@ struct KeyMapInner<'a> {
     hand: &'a [Hand],
     /// Mouse button state
     mouse_buttons: u8,
-    /// VIA/Vial layout options; persisted via `LayoutConfig`
+    /// VIA/Vial layout options; persisted via `LayoutOption`
     layout_option: u32,
     /// Matrix state for vial lock
     #[cfg(feature = "host_lock")]
@@ -424,20 +424,7 @@ impl<'a> KeyMap<'a> {
 
         // Read from storage BEFORE flattening (storage expects typed arrays).
         if let Some(storage) = storage
-            && {
-                Ok(())
-                    .and(storage.read_keymap(data, behavior).await)
-                    .and(storage.read_behavior_config(behavior).await)
-                    .and(
-                        storage
-                            .read_macro_cache(&mut behavior.keyboard_macros.macro_sequences)
-                            .await,
-                    )
-                    .and(storage.read_combos(&mut behavior.combo.combos).await)
-                    .and(storage.read_forks(&mut behavior.fork.forks).await)
-                    .and(storage.read_morses(&mut behavior.morse.morses).await)
-            }
-            .is_err()
+            && storage.read_keymap(data, behavior).await.is_err()
         {
             error!("Failed to read from storage, clearing...");
             storage.flash.erase_all().await.ok();

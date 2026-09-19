@@ -228,7 +228,9 @@ where
         self.update_stack_bonds();
 
         #[cfg(feature = "storage")]
-        store(StorageItem::BondInfo(profile_info)).await;
+        if store(StorageItem::BondInfo(profile_info)).await.is_err() {
+            error!("Failed to save bond info");
+        }
     }
 
     /// Update CCCD table in the stack
@@ -251,7 +253,12 @@ where
             self.bonded_devices[index].cccd_table = table;
 
             #[cfg(feature = "storage")]
-            store(StorageItem::BondInfo(self.bonded_devices[index].clone())).await;
+            if store(StorageItem::BondInfo(self.bonded_devices[index].clone()))
+                .await
+                .is_err()
+            {
+                error!("Failed to save CCCD table");
+            }
         } else {
             error!("Failed to update profile CCCD table: profile not found");
         }
@@ -273,12 +280,16 @@ where
 
         // Mark the profile removed, instead of deleting it from storage
         #[cfg(feature = "storage")]
-        store(StorageItem::BondInfo(ProfileInfo {
+        if store(StorageItem::BondInfo(ProfileInfo {
             slot_num,
             removed: true,
             ..Default::default()
         }))
-        .await;
+        .await
+        .is_err()
+        {
+            error!("Failed to save bond removal");
+        }
     }
 
     /// Switch to the specified profile, return true if the profile is switched
@@ -294,7 +305,9 @@ where
         self.update_stack_bonds();
 
         #[cfg(feature = "storage")]
-        store(StorageItem::ActiveBleProfile(profile)).await;
+        if store(StorageItem::ActiveBleProfile(profile)).await.is_err() {
+            error!("Failed to save active profile");
+        }
 
         info!("Switched to BLE profile: {}", profile);
 
@@ -348,8 +361,6 @@ where
                             self.clear_bond(slot).await;
                         }
                     }
-                    #[cfg(feature = "storage")]
-                    crate::storage::flush().await;
                     info!("Update profile done");
                     break;
                 }

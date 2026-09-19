@@ -39,15 +39,15 @@ run_all!(matrix, storage, usb_transport, keyboard).await;
 Ensure you allocate sufficient storage space for your keymap and bonding information. 32 KiB is generally adequate for most keyboards.
 :::
 
-## Storage Is Erased When The Firmware Changes
+## When stored data is erased
 
-Storage is automatically erased if the following values are changed:
+On boot, RMK might erase the stored data according to the change of the current firmware:
 
-- rmk version and commit
-- Cargo features
-- the compiled-in keymap and defaults
-- `macro_space_size`, `combo_max_length`, `max_patterns_per_key`. 
+| What changed | What's erased |
+| --- | --- |
+| The RMK version, commit, or Cargo features | Everything, BLE pairings included |
+| `macro_space_size`, `combo_max_length`, or `max_patterns_per_key` | Everything, BLE pairings included |
+| Your keymap, encoders, behaviors, combos, forks, morses, macros, or matrix size | Only those. Pairings are kept |
+| Anything else | Nothing |
 
-A firmware that differs in any of these erases storage on boot and re-initializes it from its defaults. Vial/Rynk edits and BLE bonds survive only reflashes of the same firmware.
-
-To erase without changing firmware, set `clear_layout = true` (keymap only) or `clear_storage = true` (everything, including bonds), flash once, then set it back.
+To erase on purpose, set `clear_layout = true` for the layout or `clear_storage = true` for everything, flash once, then set it back to `false`.

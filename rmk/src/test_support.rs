@@ -31,6 +31,7 @@ pub fn reset_connection_status() {
 #[cfg(feature = "storage")]
 pub fn clear_flash_channel() {
     crate::storage::FLASH_CHANNEL.clear();
+    crate::storage::REPLY.reset();
 }
 
 /// Stand-in for the storage task when a simulation has no flash: every write
@@ -41,18 +42,15 @@ pub async fn drain_flash_channel() {
         use crate::storage::{FLASH_CHANNEL, FlashOperationMessage, REPLY};
         loop {
             match FLASH_CHANNEL.receive().await {
-                FlashOperationMessage::Read(_, t) | FlashOperationMessage::Flush(t) => REPLY.signal((t, Ok(None))),
+                FlashOperationMessage::Read(_, t) | FlashOperationMessage::Store(_, Some(t)) => {
+                    REPLY.signal((t, Ok(None)))
+                }
                 _ => {}
             }
         }
     }
     #[cfg(not(feature = "storage"))]
     core::future::pending::<()>().await
-}
-
-#[cfg(feature = "storage")]
-pub async fn flush_storage() -> bool {
-    crate::storage::flush().await
 }
 
 const STEP: Duration = Duration::from_micros(100);
@@ -113,3 +111,20 @@ const VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| {},  // wake_by_ref
     |_| {},  // drop
 );
+
+/// Test-only stand-in for the BLE profile task: records the `Debug` form of every
+/// received action in `sink`, so a test can check what a profile-key gesture sent.
+pub async fn drain_ble_profile_channel(sink: &mut std::vec::Vec<std::string::String>) {
+    #[cfg(feature = "_ble")]
+    loop {
+        sink.push(std::format!(
+            "{:?}",
+            crate::channel::BLE_PROFILE_CHANNEL.receive().await
+        ));
+    }
+    #[cfg(not(feature = "_ble"))]
+    {
+        let _ = sink;
+        core::future::pending::<()>().await
+    }
+}

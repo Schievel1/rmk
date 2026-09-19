@@ -1320,7 +1320,7 @@ impl<'a> Keyboard<'a> {
                 // Persist only if the layer was valid (set_default_layer rejects out-of-range)
                 #[cfg(feature = "storage")]
                 if event.pressed && self.keymap.get_default_layer() == layer_num {
-                    crate::storage::store(crate::storage::StorageItem::DefaultLayer(layer_num)).await;
+                    crate::storage::store_unchecked(crate::storage::StorageItem::DefaultLayer(layer_num)).await;
                 }
             }
             Action::Modifier(modifiers) => {

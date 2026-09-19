@@ -202,7 +202,7 @@ fn behavior_write_survives_restart() {
                 .await;
             keyboard.set_behavior(SettingKey::ComboTimeout, 80);
             keyboard.set_combo(0, [k!(A), k!(B)], k!(C));
-            keyboard.wait_storage().run().await;
+            keyboard.run().await;
         }
         let mut keyboard = SimKeyboard::builder([[[k!(A), k!(B)]]]).build_with_flash(flash).await;
         keyboard

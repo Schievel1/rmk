@@ -13,7 +13,7 @@ use crate::{
 /// Config for configurable action behavior
 #[derive(Debug, Default)]
 pub struct BehaviorConfig {
-    /// Base layer; restored from flash (LayoutConfig) on boot, set at runtime by DF/PDF
+    /// Base layer; restored from flash (`DefaultLayer`) on boot, set at runtime by DF/PDF
     pub default_layer: u8,
     pub tri_layer: Option<[u8; 3]>,
     pub tap: TapConfig,

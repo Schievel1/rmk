@@ -8,7 +8,7 @@ use futures::FutureExt;
 #[cfg(all(feature = "_ble", feature = "storage"))]
 use {
     super::ble::PeerAddress,
-    crate::storage::{StorageItem, store},
+    crate::storage::{StorageItem, store_unchecked},
 };
 #[cfg(feature = "_ble")]
 use {
@@ -145,7 +145,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         #[cfg(all(feature = "_ble", feature = "storage"))]
                         SplitMessage::ClearPeer => {
                             // Clear the peer address
-                            store(StorageItem::PeerAddress(PeerAddress::new(0, false, [0; 6]))).await;
+                            store_unchecked(StorageItem::PeerAddress(PeerAddress::new(0, false, [0; 6]))).await;
                         }
                         SplitMessage::KeyboardIndicator(indicator) => {
                             // Publish KeyboardIndicator event

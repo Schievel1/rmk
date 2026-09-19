@@ -234,11 +234,14 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
                     let new_addr = conn.raw().peer_address().addr.into_inner();
                     if central_addr != Some(new_addr) {
                         info!("Saving central address to storage");
-                        crate::storage::store(crate::storage::StorageItem::PeerAddress(PeerAddress::new(
+                        // RAM only follows flash here: a peer we cannot persist must be
+                        // rediscovered after a reboot rather than silently trusted.
+                        if crate::storage::store(crate::storage::StorageItem::PeerAddress(PeerAddress::new(
                             0, true, new_addr,
                         )))
-                        .await;
-                        if crate::storage::flush().await {
+                        .await
+                        .is_ok()
+                        {
                             central_addr = Some(new_addr);
                         }
                     }

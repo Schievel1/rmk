@@ -129,7 +129,7 @@ pub(crate) async fn toggle_preferred() {
     });
     info!("Switching preferred transport to: {:?}", new);
     #[cfg(feature = "storage")]
-    crate::storage::store(crate::storage::StorageItem::ConnectionType(new)).await;
+    crate::storage::store_unchecked(crate::storage::StorageItem::ConnectionType(new)).await;
 }
 
 #[cfg(feature = "_ble")]

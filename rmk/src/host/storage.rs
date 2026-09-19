@@ -1,12 +1,11 @@
+use embassy_time::Duration;
 use embedded_storage_async::nor_flash::NorFlash as AsyncNorFlash;
-use rmk_types::fork::Fork;
-use rmk_types::morse::Morse;
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserializer, Serializer};
 
+use crate::MACRO_SPACE_SIZE;
 use crate::keyboard::combo::Combo;
 use crate::storage::{Storage, StorageData, StorageKey, print_storage_error};
-use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM};
 
 pub(crate) mod macro_bytes_serde {
     use super::*;
@@ -108,45 +107,36 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 (StorageKey::DefaultLayer, StorageData::DefaultLayer(layer)) => behavior.default_layer = layer,
                 // Restore the VIA/Vial layout options selection
                 (StorageKey::LayoutOption, StorageData::LayoutOption(option)) => data.layout_option = option,
+                (StorageKey::BehaviorConfig, StorageData::BehaviorConfig(c)) => {
+                    behavior.morse.prior_idle_time = Duration::from_millis(c.prior_idle_time as u64);
+                    behavior.morse.default_profile = c.morse_default_profile;
+                    behavior.combo.timeout = Duration::from_millis(c.combo_timeout as u64);
+                    behavior.one_shot.timeout = Duration::from_millis(c.one_shot_timeout as u64);
+                    behavior.tap.tap_interval = c.tap_interval;
+                    behavior.tap.tap_capslock_interval = c.tap_capslock_interval;
+                }
+                (StorageKey::MacroData, StorageData::MacroData(bytes)) => {
+                    behavior.keyboard_macros.macro_sequences = bytes;
+                }
+                (StorageKey::Combo(idx), StorageData::Combo(config)) => {
+                    if let Some(slot) = behavior.combo.combos.get_mut(idx as usize) {
+                        *slot = Some(Combo::new(config));
+                    }
+                }
+                (StorageKey::Fork(idx), StorageData::Fork(fork)) => {
+                    if let Some(slot) = behavior.fork.forks.get_mut(idx as usize) {
+                        *slot = fork;
+                    }
+                }
+                (StorageKey::Morse(idx), StorageData::Morse(morse)) => {
+                    if let Some(slot) = behavior.morse.morses.get_mut(idx as usize) {
+                        *slot = morse;
+                    }
+                }
                 _ => continue,
             }
         }
 
-        Ok(())
-    }
-
-    pub(crate) async fn read_macro_cache(&mut self, macro_cache: &mut [u8]) -> Result<(), ()> {
-        if let Some(StorageData::MacroData(data)) = self.fetch(StorageKey::MacroData).await? {
-            macro_cache.copy_from_slice(&data);
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn read_combos(&mut self, combos: &mut [Option<Combo>; COMBO_MAX_NUM]) -> Result<(), ()> {
-        for (i, item) in combos.iter_mut().enumerate() {
-            if let Some(StorageData::Combo(config)) = self.fetch(StorageKey::Combo(i as u8)).await? {
-                debug!("Read combo config: {:?}", config);
-                *item = Some(Combo::new(config));
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn read_forks(&mut self, forks: &mut heapless::Vec<Fork, FORK_MAX_NUM>) -> Result<(), ()> {
-        for (i, item) in forks.iter_mut().enumerate() {
-            if let Some(StorageData::Fork(fork)) = self.fetch(StorageKey::Fork(i as u8)).await? {
-                *item = fork;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn read_morses(&mut self, morses: &mut heapless::Vec<Morse, MORSE_MAX_NUM>) -> Result<(), ()> {
-        for (i, item) in morses.iter_mut().enumerate() {
-            if let Some(StorageData::Morse(morse)) = self.fetch(StorageKey::Morse(i as u8)).await? {
-                *item = morse;
-            }
-        }
         Ok(())
     }
 }
@@ -155,7 +145,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 mod tests {
     use rmk_types::action::Action;
     use rmk_types::keycode::{HidKeyCode, KeyCode};
-    use rmk_types::morse::{HOLD, MorseMode, MorsePattern, MorseProfile, TAP};
+    use rmk_types::morse::{HOLD, Morse, MorseMode, MorsePattern, MorseProfile, TAP};
     use sequential_storage::map::Value;
 
     use super::*;

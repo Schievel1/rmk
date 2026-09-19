@@ -177,8 +177,6 @@ enum SimStep {
     /// future — so the harness needs no vocabulary of its own for event types.
     #[cfg(feature = "rynk")]
     Publish(Pin<Box<dyn Future<Output = ()>>>),
-    #[cfg(feature = "storage")]
-    WaitStorage,
     #[cfg(feature = "passkey_entry")]
     BeginPasskeyEntry,
     #[cfg(feature = "passkey_entry")]
@@ -317,12 +315,6 @@ impl SimKeyboard {
         self
     }
 
-    #[cfg(feature = "storage")]
-    pub fn wait_storage(&mut self) -> &mut Self {
-        self.steps.push(SimStep::WaitStorage);
-        self
-    }
-
     #[cfg(feature = "passkey_entry")]
     pub fn begin_passkey_entry(&mut self) -> &mut Self {
         self.steps.push(SimStep::BeginPasskeyEntry);
@@ -369,7 +361,7 @@ impl SimKeyboard {
         };
         // Same for the BLE profile task, but keep what it received so tests can check it.
         let mut profile_actions = Vec::new();
-        let profiles = rmk::channel::drain_ble_profile_channel_for_test(&mut profile_actions);
+        let profiles = rmk::test_support::drain_ble_profile_channel(&mut profile_actions);
 
         // A host connection is just a byte stream: drive the production
         // `run_session` over an in-memory duplex, exactly as a USB/BLE transport
@@ -511,12 +503,6 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
             }
             #[cfg(feature = "rynk")]
             SimStep::Publish(event) => event.await,
-            #[cfg(feature = "storage")]
-            SimStep::WaitStorage => {
-                let waiting = format!("no storage write within {TIMEOUT_SECS}s");
-                let written = with_timeout(rmk::test_support::flush_storage(), &waiting).await;
-                assert!(written, "storage write failed");
-            }
             #[cfg(feature = "passkey_entry")]
             SimStep::BeginPasskeyEntry => rmk::ble::passkey::begin_passkey_entry_session(),
             #[cfg(feature = "passkey_entry")]

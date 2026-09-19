@@ -22,7 +22,10 @@ impl Handle<GetBehaviorConfig> for RynkService<'_> {
 
 impl Handle<SetBehaviorConfig> for RynkService<'_> {
     async fn handle(&self, cfg: BehaviorConfig) -> Result<(), RynkError> {
-        self.ctx.set_behavior_config(cfg).await;
+        self.ctx
+            .set_behavior_config(cfg)
+            .await
+            .map_err(|()| RynkError::StorageFault)?;
         Ok(())
     }
 }

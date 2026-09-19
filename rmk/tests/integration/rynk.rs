@@ -107,7 +107,6 @@ fn keymap_write_survives_restart() {
             let mut keyboard = SimKeyboard::builder([[[k!(A)]]]).build_with_flash(flash.clone()).await;
             keyboard
                 .rynk::<command::SetKeyAction>(SET_KEY_B, RynkReply::Ok("null"))
-                .wait_storage()
                 .run()
                 .await;
         }
