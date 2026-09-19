@@ -211,10 +211,10 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
     let runner = stack.runner();
 
     // First, read central address from storage
-    let mut central_addr = crate::storage::read_peer_address(0)
-        .await
-        .filter(|a| a.is_valid)
-        .map(|a| a.address);
+    let mut central_addr = match crate::storage::read(crate::storage::StorageKey::PeerAddress(0)).await {
+        Ok(Some(crate::storage::StorageValue::PeerAddress(a))) if a.is_valid => Some(a.address),
+        _ => None,
+    };
 
     let peri_task = async {
         // Set subrating host support before any advertising/connecting
@@ -234,12 +234,13 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
                     let new_addr = conn.raw().peer_address().addr.into_inner();
                     if central_addr != Some(new_addr) {
                         info!("Saving central address to storage");
-                        if crate::storage::write_peer_address(PeerAddress {
-                            peer_id: 0,
-                            is_valid: true,
-                            address: new_addr,
-                        })
+                        // RAM only follows flash here: a peer we cannot persist must be
+                        // rediscovered after a reboot rather than silently trusted.
+                        if crate::storage::store(crate::storage::StorageItem::PeerAddress(PeerAddress::new(
+                            0, true, new_addr,
+                        )))
                         .await
+                        .is_ok()
                         {
                             central_addr = Some(new_addr);
                         }

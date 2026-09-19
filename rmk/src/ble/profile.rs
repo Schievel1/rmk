@@ -10,9 +10,9 @@ use trouble_host::{BondInformation, LongTermKey};
 use super::ble_server::CCCD_TABLE_SIZE;
 use crate::NUM_BLE_PROFILE;
 use crate::channel::BLE_PROFILE_CHANNEL;
-#[cfg(feature = "storage")]
-use crate::channel::FLASH_CHANNEL;
 use crate::state::{current_profile, set_ble_profile};
+#[cfg(feature = "storage")]
+use crate::storage::{StorageItem, StorageKey, StorageValue, read, store};
 
 pub(crate) static UPDATED_PROFILE: Signal<crate::RawMutex, ProfileInfo> = Signal::new();
 pub(crate) static UPDATED_CCCD_TABLE: Signal<crate::RawMutex, heapless::Vec<u8, CCCD_TABLE_SIZE>> = Signal::new();
@@ -136,11 +136,9 @@ where
     /// Load stored bonding information
     #[cfg(feature = "storage")]
     pub(crate) async fn load_bonded_devices(&mut self) {
-        use crate::storage::{read_active_ble_profile, read_bond_info};
-
         self.bonded_devices.clear();
         for slot_num in 0..SLOTS {
-            if let Some(info) = read_bond_info(slot_num as u8).await
+            if let Ok(Some(StorageValue::BondInfo(info))) = read(StorageKey::BondInfo(slot_num as u8)).await
                 && !info.removed
                 && let Err(e) = self.bonded_devices.push(info)
             {
@@ -149,13 +147,14 @@ where
         }
         debug!("Loaded {} bond info", self.bonded_devices.len());
 
-        let profile = if let Some(profile) = read_active_ble_profile().await {
-            debug!("Loaded active profile: {}", profile);
-            profile
-        } else {
-            debug!("Loaded default active profile",);
-            0
-        };
+        let profile =
+            if let Ok(Some(StorageValue::ActiveBleProfile(profile))) = read(StorageKey::ActiveBleProfile).await {
+                debug!("Loaded active profile: {}", profile);
+                profile
+            } else {
+                debug!("Loaded default active profile",);
+                0
+            };
         set_ble_profile(profile);
     }
 
@@ -229,10 +228,9 @@ where
         self.update_stack_bonds();
 
         #[cfg(feature = "storage")]
-        // Send bonding information to the flash task for saving
-        FLASH_CHANNEL
-            .send(crate::storage::FlashOperationMessage::ProfileInfo(profile_info))
-            .await;
+        if store(StorageItem::BondInfo(profile_info)).await.is_err() {
+            error!("Failed to save bond info");
+        }
     }
 
     /// Update CCCD table in the stack
@@ -255,11 +253,12 @@ where
             self.bonded_devices[index].cccd_table = table;
 
             #[cfg(feature = "storage")]
-            FLASH_CHANNEL
-                .send(crate::storage::FlashOperationMessage::ProfileInfo(
-                    self.bonded_devices[index].clone(),
-                ))
-                .await;
+            if store(StorageItem::BondInfo(self.bonded_devices[index].clone()))
+                .await
+                .is_err()
+            {
+                error!("Failed to save CCCD table");
+            }
         } else {
             error!("Failed to update profile CCCD table: profile not found");
         }
@@ -279,11 +278,18 @@ where
         // Update the active bonding information in the stack
         self.update_stack_bonds();
 
+        // Mark the profile removed, instead of deleting it from storage
         #[cfg(feature = "storage")]
-        // Send the clear slot message to the flash task
-        FLASH_CHANNEL
-            .send(crate::storage::FlashOperationMessage::ClearSlot(slot_num))
-            .await;
+        if store(StorageItem::BondInfo(ProfileInfo {
+            slot_num,
+            removed: true,
+            ..Default::default()
+        }))
+        .await
+        .is_err()
+        {
+            error!("Failed to save bond removal");
+        }
     }
 
     /// Switch to the specified profile, return true if the profile is switched
@@ -299,9 +305,9 @@ where
         self.update_stack_bonds();
 
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL
-            .send(crate::storage::FlashOperationMessage::ActiveBleProfile(profile))
-            .await;
+        if store(StorageItem::ActiveBleProfile(profile)).await.is_err() {
+            error!("Failed to save active profile");
+        }
 
         info!("Switched to BLE profile: {}", profile);
 
@@ -355,8 +361,6 @@ where
                             self.clear_bond(slot).await;
                         }
                     }
-                    #[cfg(feature = "storage")]
-                    crate::storage::flush().await;
                     info!("Update profile done");
                     break;
                 }

@@ -90,7 +90,7 @@ impl<'a> VialService<'a> {
                     Ok(v) => match v {
                         ViaKeyboardInfo::LayoutOptions => {
                             let layout_option = BigEndian::read_u32(&report.output_data[2..6]);
-                            self.ctx.set_layout_options(layout_option).await;
+                            let _ = self.ctx.set_layout_options(layout_option).await;
                         }
                         ViaKeyboardInfo::DeviceIndication => {
                             let _device_indication = report.output_data[2];
@@ -120,7 +120,7 @@ impl<'a> VialService<'a> {
                     "Setting keycode: 0x{:02X} at ({},{}), layer {} as {:?}",
                     keycode, row, col, layer, action
                 );
-                self.ctx.set_action(layer, row, col, action).await;
+                let _ = self.ctx.set_action(layer, row, col, action).await;
             }
             ViaCommand::DynamicKeymapReset => {
                 warn!("Dynamic keymap reset -- not supported")
@@ -181,7 +181,8 @@ impl<'a> VialService<'a> {
 
                     // Update macro cache + flush full buffer to storage
                     info!("Setting macro buffer, offset: {}, size: {}", offset, size);
-                    self.ctx
+                    let _ = self
+                        .ctx
                         .write_macro_buffer(offset as usize, &report.output_data[4..4 + size as usize])
                         .await;
                 } else {
@@ -220,7 +221,11 @@ impl<'a> VialService<'a> {
                     let via_keycode = LittleEndian::read_u16(&report.output_data[idx..idx + 2]);
                     let action = from_via_keycode(via_keycode);
                     let flat_index = offset as usize + i;
-                    self.ctx.try_set_action_flat(flat_index, action, rows, cols);
+                    let (layer, in_layer) = (flat_index / (rows * cols), flat_index % (rows * cols));
+                    let _ = self
+                        .ctx
+                        .set_action(layer as u8, (in_layer / cols) as u8, (in_layer % cols) as u8, action)
+                        .await;
                     idx += 2;
                 }
             }
@@ -290,6 +295,15 @@ mod tests {
         f(&mut service)
     }
 
+    /// These tests run no storage task, so writes that wait for one would never be
+    /// answered; the stand-in answers them.
+    fn process(service: &mut VialService, report: &mut ViaReport) {
+        block_on(embassy_futures::select::select(
+            service.process_via_packet(report),
+            crate::test_support::drain_flash_channel(),
+        ));
+    }
+
     /// A `DynamicKeymapMacroSetBuffer` (0x0F) report with `offset = 0` and the
     /// given payload `size` byte. The caller mirrors `Runnable::run` by seeding
     /// `input_data` with a copy of `output_data`.
@@ -309,7 +323,7 @@ mod tests {
     fn macro_set_buffer_max_size_ok() {
         with_service(|service| {
             let mut report = macro_set_buffer_report(28);
-            block_on(service.process_via_packet(&mut report));
+            process(service, &mut report);
         });
     }
 
@@ -320,7 +334,7 @@ mod tests {
     fn macro_set_buffer_oversize_rejected() {
         with_service(|service| {
             let mut report = macro_set_buffer_report(29);
-            block_on(service.process_via_packet(&mut report));
+            process(service, &mut report);
             assert_eq!(report.input_data[0], 0xFF);
         });
     }
@@ -346,10 +360,10 @@ mod tests {
     fn layout_options_set_then_get_roundtrip() {
         with_service(|service| {
             let mut set = layout_options_report(0x03, 0x00C0_FFEE);
-            block_on(service.process_via_packet(&mut set));
+            process(service, &mut set);
 
             let mut get = layout_options_report(0x02, 0);
-            block_on(service.process_via_packet(&mut get));
+            process(service, &mut get);
             assert_eq!(BigEndian::read_u32(&get.input_data[2..6]), 0x00C0_FFEE);
         });
     }

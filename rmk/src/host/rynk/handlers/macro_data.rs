@@ -20,7 +20,10 @@ impl Handle<GetMacro> for RynkService<'_> {
 
 impl Handle<SetMacro> for RynkService<'_> {
     async fn handle(&self, r: SetMacroRequest) -> Result<(), RynkError> {
-        self.ctx.write_macro_buffer(r.offset as usize, &r.data.data).await;
+        self.ctx
+            .write_macro_buffer(r.offset as usize, &r.data.data)
+            .await
+            .map_err(|()| RynkError::StorageFault)?;
         Ok(())
     }
 }

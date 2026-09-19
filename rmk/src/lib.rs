@@ -57,8 +57,6 @@ compile_error!("feature `dfu_lock` requires the `_dfu` feature — enable `dfu_r
 // Re-export self as ::rmk for macro-generated code to work both inside and outside the crate
 extern crate self as rmk;
 
-include!(concat!(env!("OUT_DIR"), "/constants.rs"));
-
 // TODO: re-export to `constants`?
 pub(crate) use rmk_types::constants::*;
 
@@ -184,7 +182,7 @@ pub async fn initialize_keymap_and_storage<
 
     #[cfg(not(feature = "host"))]
     {
-        let storage = Storage::new(flash, storage_config, behavior_config).await;
+        let storage = Storage::new(flash, storage_config).await;
         let keymap = KeyMap::new(data, behavior_config, positional_config).await;
         (keymap, storage)
     }

@@ -92,6 +92,7 @@ pub(crate) async fn run(server: &Server<'_>, conn: &GattConnection<'_, '_, Defau
         crate::custom_message::forward(Some(CustomMessageTarget::Dongle), async |encoded| {
             custom_to_dongle.notify_raw(conn, encoded, false).await
         })
+        .await
     };
 
     #[cfg(not(feature = "custom_message"))]

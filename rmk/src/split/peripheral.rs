@@ -6,7 +6,10 @@ use embassy_futures::select::{Either, select};
 use embedded_io_async::{Read, Write};
 use futures::FutureExt;
 #[cfg(all(feature = "_ble", feature = "storage"))]
-use {super::ble::PeerAddress, crate::channel::FLASH_CHANNEL};
+use {
+    super::ble::PeerAddress,
+    crate::storage::{StorageItem, store_unchecked},
+};
 #[cfg(feature = "_ble")]
 use {
     crate::event::{BatteryStatusEvent, ChargingStateEvent, EventSubscriber},
@@ -142,11 +145,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         #[cfg(all(feature = "_ble", feature = "storage"))]
                         SplitMessage::ClearPeer => {
                             // Clear the peer address
-                            FLASH_CHANNEL
-                                .send(crate::storage::FlashOperationMessage::PeerAddress(PeerAddress::new(
-                                    0, false, [0; 6],
-                                )))
-                                .await;
+                            store_unchecked(StorageItem::PeerAddress(PeerAddress::new(0, false, [0; 6]))).await;
                         }
                         SplitMessage::KeyboardIndicator(indicator) => {
                             // Publish KeyboardIndicator event

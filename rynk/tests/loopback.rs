@@ -202,7 +202,7 @@ async fn client_against_run_session() {
     // Drain flash writes; the session should not finish before the script.
     let device = select(
         service.run_session(&mut dev_rx, &mut dev_tx),
-        rmk::channel::drain_flash_channel_for_test(),
+        rmk::test_support::drain_flash_channel(),
     );
     match select(device, script).await {
         Either::First(_) => panic!("run_session ended before the client script finished"),
@@ -262,7 +262,7 @@ async fn lock_gate_rejects_and_reports() {
 
     let device = select(
         service.run_session(&mut dev_rx, &mut dev_tx),
-        rmk::channel::drain_flash_channel_for_test(),
+        rmk::test_support::drain_flash_channel(),
     );
     match select(device, script).await {
         Either::First(_) => panic!("run_session ended before the client script finished"),

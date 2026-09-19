@@ -1,12 +1,11 @@
+use embassy_time::Duration;
 use embedded_storage_async::nor_flash::NorFlash as AsyncNorFlash;
-use rmk_types::fork::Fork;
-use rmk_types::morse::Morse;
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserializer, Serializer};
 
+use crate::MACRO_SPACE_SIZE;
 use crate::keyboard::combo::Combo;
-use crate::storage::{Storage, StorageData, StorageKey, print_storage_error};
-use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM};
+use crate::storage::{Storage, StorageKey, StorageValue, print_storage_error};
 
 pub(crate) mod macro_bytes_serde {
     use super::*;
@@ -83,13 +82,13 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             .map_err(|e| print_storage_error::<F>(e))?;
 
         // Read all keymap keys and encoder configs
-        while let Some((key, item)) = key_iterator
-            .next::<StorageData>(&mut self.buffer)
+        while let Some((key, value)) = key_iterator
+            .next::<StorageValue>(&mut self.buffer)
             .await
             .map_err(|e| print_storage_error::<F>(e))?
         {
-            match (key, item) {
-                (StorageKey::Keymap { layer, row, col }, StorageData::KeyAction(action)) => {
+            match (key, value) {
+                (StorageKey::Keymap { layer, row, col }, StorageValue::KeyAction(action)) => {
                     let layer = layer as usize;
                     let row = row as usize;
                     let col = col as usize;
@@ -97,88 +96,44 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                         data.keymap[layer][row][col] = action;
                     }
                 }
-                (StorageKey::Encoder { layer, idx }, StorageData::EncoderAction(action)) => {
+                (StorageKey::Encoder { layer, idx }, StorageValue::EncoderAction(action)) => {
                     let idx = idx as usize;
                     let layer = layer as usize;
                     if layer < NUM_LAYER && idx < NUM_ENCODER {
                         data.encoder_map[layer][idx] = action;
                     }
                 }
-                (StorageKey::LayoutConfig, StorageData::LayoutConfig(config)) => {
-                    // Restore the default (base) layer set via a `PDF` key
-                    behavior.default_layer = config.default_layer;
-                    // Restore the VIA/Vial layout options selection
-                    data.layout_option = config.layout_option;
+                // Restore the default (base) layer set via a `PDF` key
+                (StorageKey::DefaultLayer, StorageValue::DefaultLayer(layer)) => behavior.default_layer = layer,
+                // Restore the VIA/Vial layout options selection
+                (StorageKey::LayoutOption, StorageValue::LayoutOption(option)) => data.layout_option = option,
+                (StorageKey::BehaviorConfig, StorageValue::BehaviorConfig(c)) => {
+                    behavior.morse.prior_idle_time = Duration::from_millis(c.prior_idle_time as u64);
+                    behavior.morse.default_profile = c.morse_default_profile;
+                    behavior.combo.timeout = Duration::from_millis(c.combo_timeout as u64);
+                    behavior.one_shot.timeout = Duration::from_millis(c.one_shot_timeout as u64);
+                    behavior.tap.tap_interval = c.tap_interval;
+                    behavior.tap.tap_capslock_interval = c.tap_capslock_interval;
+                }
+                (StorageKey::MacroData, StorageValue::MacroData(bytes)) => {
+                    behavior.keyboard_macros.macro_sequences = bytes;
+                }
+                (StorageKey::Combo(idx), StorageValue::Combo(config)) => {
+                    if let Some(slot) = behavior.combo.combos.get_mut(idx as usize) {
+                        *slot = Some(Combo::new(config));
+                    }
+                }
+                (StorageKey::Fork(idx), StorageValue::Fork(fork)) => {
+                    if let Some(slot) = behavior.fork.forks.get_mut(idx as usize) {
+                        *slot = fork;
+                    }
+                }
+                (StorageKey::Morse(idx), StorageValue::Morse(morse)) => {
+                    if let Some(slot) = behavior.morse.morses.get_mut(idx as usize) {
+                        *slot = morse;
+                    }
                 }
                 _ => continue,
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn read_macro_cache(&mut self, macro_cache: &mut [u8]) -> Result<(), ()> {
-        let read_data = self
-            .flash
-            .fetch_item(&mut self.buffer, &StorageKey::MacroData)
-            .await
-            .map_err(|e| print_storage_error::<F>(e))?;
-
-        if let Some(StorageData::MacroData(data)) = read_data {
-            macro_cache.copy_from_slice(&data);
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn read_combos(&mut self, combos: &mut [Option<Combo>; COMBO_MAX_NUM]) -> Result<(), ()> {
-        use crate::keyboard::combo::Combo;
-
-        for (i, item) in combos.iter_mut().enumerate() {
-            let key = StorageKey::combo(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Combo(config)) = read_data {
-                debug!("Read combo config: {:?}", config);
-                *item = Some(Combo::new(config));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn read_forks(&mut self, forks: &mut heapless::Vec<Fork, FORK_MAX_NUM>) -> Result<(), ()> {
-        for (i, item) in forks.iter_mut().enumerate() {
-            let key = StorageKey::fork(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Fork(fork)) = read_data {
-                *item = fork;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn read_morses(&mut self, morses: &mut heapless::Vec<Morse, MORSE_MAX_NUM>) -> Result<(), ()> {
-        for (i, item) in morses.iter_mut().enumerate() {
-            let key = StorageKey::morse(i as u8);
-            let read_data = self
-                .flash
-                .fetch_item(&mut self.buffer, &key)
-                .await
-                .map_err(|e| print_storage_error::<F>(e))?;
-
-            if let Some(StorageData::Morse(morse)) = read_data {
-                *item = morse;
             }
         }
 
@@ -190,7 +145,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 mod tests {
     use rmk_types::action::Action;
     use rmk_types::keycode::{HidKeyCode, KeyCode};
-    use rmk_types::morse::{HOLD, MorseMode, MorsePattern, MorseProfile, TAP};
+    use rmk_types::morse::{HOLD, Morse, MorseMode, MorsePattern, MorseProfile, TAP};
     use sequential_storage::map::Value;
 
     use super::*;
@@ -207,15 +162,15 @@ mod tests {
 
         // Serialization
         let mut buffer = [0u8; 64];
-        let storage_data = StorageData::Morse(morse.clone());
+        let storage_data = StorageValue::Morse(morse.clone());
         let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
 
         // Deserialization
-        let deserialized_data = StorageData::deserialize_from(&buffer[..serialized_size]).unwrap();
+        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
 
         // Validation
         match deserialized_data {
-            (StorageData::Morse(deserialized_morse), _) => {
+            (StorageValue::Morse(deserialized_morse), _) => {
                 // actions
                 assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
                 for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
@@ -237,15 +192,15 @@ mod tests {
 
         // Serialization
         let mut buffer = [0u8; 64];
-        let storage_data = StorageData::Morse(morse.clone());
+        let storage_data = StorageValue::Morse(morse.clone());
         let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
 
         // Deserialization
-        let deserialized_data = StorageData::deserialize_from(&buffer[..serialized_size]).unwrap();
+        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
 
         // Validation
         match deserialized_data {
-            (StorageData::Morse(deserialized_morse), _) => {
+            (StorageValue::Morse(deserialized_morse), _) => {
                 // actions
                 assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
                 for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
@@ -290,15 +245,15 @@ mod tests {
 
         // Serialization
         let mut buffer = [0u8; 64];
-        let storage_data = StorageData::Morse(morse.clone());
+        let storage_data = StorageValue::Morse(morse.clone());
         let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
 
         // Deserialization
-        let deserialized_data = StorageData::deserialize_from(&buffer[..serialized_size]).unwrap();
+        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
 
         // Validation
         match deserialized_data {
-            (StorageData::Morse(deserialized_morse), _) => {
+            (StorageValue::Morse(deserialized_morse), _) => {
                 // actions
                 assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
                 for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
