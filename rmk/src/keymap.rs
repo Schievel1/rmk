@@ -423,12 +423,15 @@ impl<'a> KeyMap<'a> {
         fill_vec(&mut behavior.morse.morses);
 
         // Read from storage BEFORE flattening (storage expects typed arrays).
-        if let Some(storage) = storage
-            && storage.read_keymap(data, behavior).await.is_err()
-        {
-            error!("Failed to read from storage, clearing...");
-            storage.flash.erase_all().await.ok();
-            reboot_keyboard();
+        if let Some(storage) = storage {
+            if storage.clear_layout {
+                debug!("`clear_layout` is set, rewriting the items the compiled-in layout owns.");
+                storage.write_layout(data, behavior).await;
+            } else if storage.read_keymap(data, behavior).await.is_err() {
+                error!("Failed to read from storage, clearing...");
+                storage.flash.erase_all().await.ok();
+                reboot_keyboard();
+            }
         }
 
         Self::build(data, behavior, positional_config)

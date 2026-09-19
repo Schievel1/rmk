@@ -8,8 +8,10 @@
 //! Lives in the test crate, so it drives only rmk's public API (plus the
 //! `#[doc(hidden)]` `rmk::test_support` gate for a few internal signals).
 
+/// Geometry of the simulated flash part: 4 KiB in 256-byte sectors, written 4
+/// bytes at a time.
 #[cfg(feature = "storage")]
-pub mod flash;
+pub type Flash = rmk::test_support::InMemoryFlash<4096, 256, 4>;
 
 use core::future::Future;
 use core::pin::Pin;

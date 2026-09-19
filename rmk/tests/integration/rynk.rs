@@ -102,7 +102,7 @@ fn keymap_write_survives_restart() {
     const SET_KEY_B: &str = r#"{"position":{"layer":0,"row":0,"col":0},"action":{"Single":{"Key":{"Hid":"B"}}}}"#;
 
     test_block_on(async {
-        let flash = crate::simulator::flash::InMemoryFlash::new();
+        let flash = crate::simulator::Flash::new();
         {
             let mut keyboard = SimKeyboard::builder([[[k!(A)]]]).build_with_flash(flash.clone()).await;
             keyboard
@@ -129,7 +129,7 @@ fn set_key_on_failing_flash_replies_storage_fault() {
     const SET_KEY_B: &str = r#"{"position":{"layer":0,"row":0,"col":0},"action":{"Single":{"Key":{"Hid":"B"}}}}"#;
 
     test_block_on(async {
-        let flash = crate::simulator::flash::InMemoryFlash::new();
+        let flash = crate::simulator::Flash::new();
         {
             let mut keyboard = SimKeyboard::builder([[[k!(A)]]]).build_with_flash(flash.clone()).await;
             flash.fail_writes(true);

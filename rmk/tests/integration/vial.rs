@@ -195,7 +195,7 @@ fn morse_write_changes_the_tap() {
 #[test]
 fn behavior_write_survives_restart() {
     test_block_on(async {
-        let flash = crate::simulator::flash::InMemoryFlash::new();
+        let flash = crate::simulator::Flash::new();
         {
             let mut keyboard = SimKeyboard::builder([[[k!(A), k!(B)]]])
                 .build_with_flash(flash.clone())

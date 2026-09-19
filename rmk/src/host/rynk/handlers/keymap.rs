@@ -27,8 +27,7 @@ impl Handle<SetKeyAction> for RynkService<'_> {
         self.ctx
             .set_action(set.position.layer, set.position.row, set.position.col, set.action)
             .await
-            .map_err(|()| RynkError::StorageFault)?;
-        Ok(())
+            .or(Err(RynkError::StorageFault))
     }
 }
 
@@ -44,11 +43,7 @@ impl Handle<SetDefaultLayer> for RynkService<'_> {
         if (layer as usize) >= num_layers {
             return Err(RynkError::Invalid);
         }
-        self.ctx
-            .set_default_layer(layer)
-            .await
-            .map_err(|()| RynkError::StorageFault)?;
-        Ok(())
+        self.ctx.set_default_layer(layer).await.or(Err(RynkError::StorageFault))
     }
 }
 
@@ -65,8 +60,7 @@ impl Handle<SetEncoderAction> for RynkService<'_> {
         self.ctx
             .set_encoder(r.layer, r.encoder_id, r.action)
             .await
-            .map_err(|()| RynkError::StorageFault)?;
-        Ok(())
+            .or(Err(RynkError::StorageFault))
     }
 }
 
@@ -135,7 +129,7 @@ impl HandleBulk<SetKeymapBulk> for RynkService<'_> {
             self.ctx
                 .set_action(layer, row, col, action)
                 .await
-                .map_err(|()| RynkError::StorageFault)?;
+                .or(Err(RynkError::StorageFault))?;
         }
         msg.encode_response(&())
     }

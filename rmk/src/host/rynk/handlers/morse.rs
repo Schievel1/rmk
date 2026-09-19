@@ -20,12 +20,9 @@ impl Handle<SetMorse> for RynkService<'_> {
             return Err(RynkError::Invalid);
         }
         self.ctx
-            .update_morse(r.index, |m| {
-                *m = r.config;
-            })
+            .update_morse(r.index, |m| *m = r.config)
             .await
-            .map_err(|()| RynkError::StorageFault)?;
-        Ok(())
+            .or(Err(RynkError::StorageFault))
     }
 }
 
@@ -46,7 +43,7 @@ impl HandleBulk<SetMorseBulk> for RynkService<'_> {
             self.ctx
                 .update_morse(idx as u8, |m| *m = config)
                 .await
-                .map_err(|()| RynkError::StorageFault)?;
+                .or(Err(RynkError::StorageFault))?;
         }
         msg.encode_response(&())
     }

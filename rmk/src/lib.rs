@@ -79,8 +79,6 @@ use keymap::KeyMap;
 pub use keymap::KeymapData;
 pub use rmk_macro as macros;
 pub use rmk_types as types;
-#[cfg(all(feature = "storage", feature = "host"))]
-use rmk_types::action::EncoderAction;
 #[cfg(feature = "_ble")]
 pub use trouble_host::prelude::*;
 #[cfg(feature = "storage")]
@@ -165,25 +163,14 @@ pub async fn initialize_keymap_and_storage<
     behavior_config: &'a mut config::BehaviorConfig,
     positional_config: &'a PositionalConfig<ROW, COL>,
 ) -> (KeyMap<'a>, Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>) {
+    // `mut` is only taken by the host build's keymap restore below.
+    #[cfg_attr(not(feature = "host"), allow(unused_mut))]
+    let mut storage = Storage::new(flash, storage_config).await;
+
     #[cfg(feature = "host")]
-    {
-        let mut storage = {
-            let encoder_opt: Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]> = if NUM_ENCODER > 0 {
-                Some(&mut data.encoder_map)
-            } else {
-                None
-            };
-            Storage::new(flash, &data.keymap, &encoder_opt, storage_config, behavior_config).await
-        };
-
-        let keymap = KeyMap::new_from_storage(data, Some(&mut storage), behavior_config, positional_config).await;
-        (keymap, storage)
-    }
-
+    let keymap = KeyMap::new_from_storage(data, Some(&mut storage), behavior_config, positional_config).await;
     #[cfg(not(feature = "host"))]
-    {
-        let storage = Storage::new(flash, storage_config).await;
-        let keymap = KeyMap::new(data, behavior_config, positional_config).await;
-        (keymap, storage)
-    }
+    let keymap = KeyMap::new(data, behavior_config, positional_config).await;
+
+    (keymap, storage)
 }
