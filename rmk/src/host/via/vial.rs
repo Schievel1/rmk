@@ -435,7 +435,7 @@ mod tests {
 
     use super::*;
     use crate::COMBO_MAX_LENGTH;
-    use crate::storage::StorageData;
+    use crate::storage::StorageValue;
     #[test]
     fn test_combo_serialization_deserialization() {
         let mut actions = heapless::Vec::<KeyAction, COMBO_MAX_LENGTH>::new();
@@ -448,13 +448,13 @@ mod tests {
             layer: None,
         };
         let mut buffer = [0u8; 64];
-        let storage_data = StorageData::Combo(combo_config.clone());
+        let storage_data = StorageValue::Combo(combo_config.clone());
         let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
         // Deserialization
-        let deserialized_data = StorageData::deserialize_from(&buffer[..serialized_size]).unwrap();
+        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
         // Validation
         match deserialized_data {
-            (StorageData::Combo(deserialized_config), _) => {
+            (StorageValue::Combo(deserialized_config), _) => {
                 assert_eq!(deserialized_config, combo_config);
             }
             _ => panic!("Expected Combo"),

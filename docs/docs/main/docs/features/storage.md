@@ -47,7 +47,6 @@ On boot, RMK might erase the stored data according to the change of the current 
 | --- | --- |
 | The RMK version, commit, or Cargo features | Everything, BLE pairings included |
 | `macro_space_size`, `combo_max_length`, or `max_patterns_per_key` | Everything, BLE pairings included |
-| Your keymap, encoders, behaviors, combos, forks, morses, macros, or matrix size | Only those. Pairings are kept |
-| Anything else | Nothing |
+| Anything else, your keymap included | Nothing |
 
-To erase on purpose, set `clear_layout = true` for the layout or `clear_storage = true` for everything, flash once, then set it back to `false`.
+Editing the keymap in `keyboard.toml` or in Rust does **not** by itself replace what is stored: the stored keymap wins on boot, so edits made over Vial or Rynk survive a reflash. To hand the win back to the firmware, set `clear_layout = true` in the `[storage]` section of `keyboard.toml` (or the same field of `StorageConfig`), flash once, then set it back to `false`. It rewrites the keymap, encoders, behaviors, combos, forks, morses and macros from the firmware and keeps the BLE pairings; `clear_storage = true` erases everything, pairings included.

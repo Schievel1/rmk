@@ -18,7 +18,7 @@ use crate::event::{EventSubscriber, SleepStateEvent, SubscribableEvent};
 use crate::split::ble::PeerAddress;
 use crate::split::driver::{PeripheralManager, SplitDriverError, SplitReader, SplitWriter, set_peripheral_connected};
 use crate::split::{PeripheralMatrixConfig, SPLIT_MESSAGE_MAX_SIZE, SplitMessage};
-use crate::storage::{StorageData, StorageItem, StorageKey, read, store_unchecked};
+use crate::storage::{StorageItem, StorageKey, StorageValue, read, store_unchecked};
 
 static PERIPHERAL_FOUND: Signal<crate::RawMutex, (u8, BdAddr)> = Signal::new();
 
@@ -52,7 +52,7 @@ pub(crate) async fn scan_and_connect_peripherals<'a, C: Controller + ControllerC
     // Load each peripheral's stored address first.
     let mut peripheral_slots: [SlotState; crate::SPLIT_PERIPHERALS_NUM] = core::array::from_fn(|_| SlotState::NoAddr);
     for (id, slot) in peripheral_slots.iter_mut().enumerate() {
-        if let Ok(Some(StorageData::PeerAddress(peer))) = read(StorageKey::PeerAddress(id as u8)).await
+        if let Ok(Some(StorageValue::PeerAddress(peer))) = read(StorageKey::PeerAddress(id as u8)).await
             && peer.is_valid
         {
             *slot = SlotState::Disconnected(peer.address);

@@ -182,7 +182,7 @@ pub async fn initialize_keymap_and_storage<
 
     #[cfg(not(feature = "host"))]
     {
-        let storage = Storage::new(flash, storage_config, behavior_config).await;
+        let storage = Storage::new(flash, storage_config).await;
         let keymap = KeyMap::new(data, behavior_config, positional_config).await;
         (keymap, storage)
     }

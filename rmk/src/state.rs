@@ -105,7 +105,7 @@ pub(crate) fn set_preferred_connection(t: ConnectionType) {
 #[cfg(feature = "_ble")]
 pub(crate) async fn load_preferred_connection() -> ConnectionType {
     #[cfg(feature = "storage")]
-    if let Ok(Some(crate::storage::StorageData::ConnectionType(c))) =
+    if let Ok(Some(crate::storage::StorageValue::ConnectionType(c))) =
         crate::storage::read(crate::storage::StorageKey::ConnectionType).await
     {
         return c;

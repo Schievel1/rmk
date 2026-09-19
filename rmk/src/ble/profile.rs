@@ -12,7 +12,7 @@ use crate::NUM_BLE_PROFILE;
 use crate::channel::BLE_PROFILE_CHANNEL;
 use crate::state::{current_profile, set_ble_profile};
 #[cfg(feature = "storage")]
-use crate::storage::{StorageData, StorageItem, StorageKey, read, store};
+use crate::storage::{StorageItem, StorageKey, StorageValue, read, store};
 
 pub(crate) static UPDATED_PROFILE: Signal<crate::RawMutex, ProfileInfo> = Signal::new();
 pub(crate) static UPDATED_CCCD_TABLE: Signal<crate::RawMutex, heapless::Vec<u8, CCCD_TABLE_SIZE>> = Signal::new();
@@ -138,7 +138,7 @@ where
     pub(crate) async fn load_bonded_devices(&mut self) {
         self.bonded_devices.clear();
         for slot_num in 0..SLOTS {
-            if let Ok(Some(StorageData::BondInfo(info))) = read(StorageKey::BondInfo(slot_num as u8)).await
+            if let Ok(Some(StorageValue::BondInfo(info))) = read(StorageKey::BondInfo(slot_num as u8)).await
                 && !info.removed
                 && let Err(e) = self.bonded_devices.push(info)
             {
@@ -147,14 +147,14 @@ where
         }
         debug!("Loaded {} bond info", self.bonded_devices.len());
 
-        let profile = if let Ok(Some(StorageData::ActiveBleProfile(profile))) = read(StorageKey::ActiveBleProfile).await
-        {
-            debug!("Loaded active profile: {}", profile);
-            profile
-        } else {
-            debug!("Loaded default active profile",);
-            0
-        };
+        let profile =
+            if let Ok(Some(StorageValue::ActiveBleProfile(profile))) = read(StorageKey::ActiveBleProfile).await {
+                debug!("Loaded active profile: {}", profile);
+                profile
+            } else {
+                debug!("Loaded default active profile",);
+                0
+            };
         set_ble_profile(profile);
     }
 

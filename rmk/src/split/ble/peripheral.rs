@@ -212,7 +212,7 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
 
     // First, read central address from storage
     let mut central_addr = match crate::storage::read(crate::storage::StorageKey::PeerAddress(0)).await {
-        Ok(Some(crate::storage::StorageData::PeerAddress(a))) if a.is_valid => Some(a.address),
+        Ok(Some(crate::storage::StorageValue::PeerAddress(a))) if a.is_valid => Some(a.address),
         _ => None,
     };
 
