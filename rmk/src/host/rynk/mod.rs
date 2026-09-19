@@ -87,16 +87,7 @@ impl<'a> RynkService<'a> {
             return Err(RynkError::Locked);
         }
 
-        let served = self.serve_cmd(cmd, locker, msg).await;
-        #[cfg(feature = "storage")]
-        if served.is_ok() && Self::needs_storage_write(cmd) && !crate::storage::flush().await {
-            return Err(RynkError::StorageFault);
-        }
-        served
-    }
-
-    async fn serve_cmd(&self, cmd: Cmd, locker: &HostLock<'_>, msg: &mut RynkMessage<'_>) -> Result<(), RynkError> {
-        match cmd {
+        let served = match cmd {
             Cmd::GetVersion => serve::<command::GetVersion, _>(self, msg).await,
             Cmd::GetCapabilities => serve::<command::GetCapabilities, _>(self, msg).await,
             Cmd::Reboot => serve::<command::Reboot, _>(self, msg).await,
@@ -156,7 +147,12 @@ impl<'a> RynkService<'a> {
             Cmd::GetLayout => serve::<command::GetLayout, _>(self, msg).await,
 
             _ => Err(RynkError::UnknownCmd),
+        };
+        #[cfg(feature = "storage")]
+        if served.is_ok() && Self::needs_storage_write(cmd) && !crate::storage::flush().await {
+            return Err(RynkError::StorageFault);
         }
+        served
     }
 
     /// Drive one rynk session based on embedded-io `rx`/`tx`.
