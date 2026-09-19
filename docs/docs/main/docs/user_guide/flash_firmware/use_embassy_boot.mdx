@@ -275,6 +275,7 @@ If an LED pin is configured in `keyboard.toml` (default `PIN_25` on RP2040 and `
 | DFU unlocked (ready for dfu-util)     | Blinks (toggles every 200 ms)    |
 | DFU download started                  | On                               |
 | Writing data blocks                   | Toggles on each block (flickers) |
+| DFU error / aborted                   | Blinks for 5 s, then off         |
 | DFU finished / system reset           | Off                              |
 
 Additionally the rmk-boot bootloader has blinking codes using PIN_25 (RP2040) / P0_15 (nRF52) as well:
@@ -480,7 +481,7 @@ This setup also enables DFU updates via USB for the peripheral, if a USB connect
 ## BLE DFU (dfu_ble)
 
 `dfu_ble` enables over-the-air firmware updates for BLE keyboards.
-When a split peripheral can't find its central after boot, it enters DFU advertising mode — a BLE host ([rynk-wtf](https://github.com/rmk-rs/rmk/tree/main/rynk/rynk-wtf)) can
+When a split peripheral can't find its central for 10 seconds after boot, it enters DFU advertising mode — a BLE host ([rynk-wtf](https://github.com/rmk-rs/rmk/tree/main/rynk/rynk-wtf)) can
 discover it and transfer a new firmware image directly.
 
 ### Feature flags
