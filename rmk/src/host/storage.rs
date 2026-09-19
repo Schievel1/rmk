@@ -150,119 +150,44 @@ mod tests {
 
     use super::*;
 
+    /// Every shape of `Morse` a host can write has to survive the round trip:
+    /// Vial's four fixed actions, a partly filled table, and raw morse patterns.
     #[test]
-    fn test_morse_serialization_deserialization() {
-        let morse = Morse::new_from_vial(
-            Action::Key(KeyCode::Hid(HidKeyCode::A)),
-            Action::Key(KeyCode::Hid(HidKeyCode::B)),
-            Action::Key(KeyCode::Hid(HidKeyCode::C)),
-            Action::Key(KeyCode::Hid(HidKeyCode::D)),
-            MorseProfile::new(Some(true), Some(MorseMode::PermissiveHold), Some(190u16), Some(180u16)),
+    fn morse_round_trips_through_a_storage_value() {
+        let key = |k| Action::Key(KeyCode::Hid(k));
+
+        let vial = Morse::new_from_vial(
+            key(HidKeyCode::A),
+            key(HidKeyCode::B),
+            key(HidKeyCode::C),
+            key(HidKeyCode::D),
+            MorseProfile::new(Some(true), Some(MorseMode::PermissiveHold), Some(190), Some(180)),
         );
 
-        // Serialization
-        let mut buffer = [0u8; 64];
-        let storage_data = StorageValue::Morse(morse.clone());
-        let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
+        let mut partial = Morse::default();
+        _ = partial.put(TAP, key(HidKeyCode::A));
+        _ = partial.put(HOLD, key(HidKeyCode::B));
 
-        // Deserialization
-        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
-
-        // Validation
-        match deserialized_data {
-            (StorageValue::Morse(deserialized_morse), _) => {
-                // actions
-                assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
-                for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
-                    assert_eq!(original, deserialized);
-                }
-                // profile
-                assert_eq!(deserialized_morse.profile, morse.profile);
-            }
-            _ => panic!("Expected MorseData"),
-        }
-    }
-
-    #[test]
-    fn test_morse_with_partial_actions() {
-        // Create a Morse with partial actions
-        let mut morse = Morse::default();
-        _ = morse.put(TAP, Action::Key(KeyCode::Hid(HidKeyCode::A)));
-        _ = morse.put(HOLD, Action::Key(KeyCode::Hid(HidKeyCode::B)));
-
-        // Serialization
-        let mut buffer = [0u8; 64];
-        let storage_data = StorageValue::Morse(morse.clone());
-        let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
-
-        // Deserialization
-        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
-
-        // Validation
-        match deserialized_data {
-            (StorageValue::Morse(deserialized_morse), _) => {
-                // actions
-                assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
-                for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
-                    assert_eq!(original, deserialized);
-                }
-                // profile
-                assert_eq!(deserialized_morse.profile, morse.profile);
-            }
-            _ => panic!("Expected MorseData"),
-        }
-    }
-
-    #[test]
-    fn test_morse_with_morse_serialization_deserialization() {
-        let mut morse = Morse {
-            profile: MorseProfile::new(
-                Some(false),
-                Some(MorseMode::HoldOnOtherPress),
-                Some(210u16),
-                Some(220u16),
-            ),
+        let mut patterns = Morse {
+            profile: MorseProfile::new(Some(false), Some(MorseMode::HoldOnOtherPress), Some(210), Some(220)),
             actions: heapless::LinearMap::default(),
         };
-        morse
-            .actions
-            .insert(MorsePattern::from_u16(0b1_01), Action::Key(KeyCode::Hid(HidKeyCode::A)))
-            .ok();
-        morse
-            .actions
-            .insert(
-                MorsePattern::from_u16(0b1_1000),
-                Action::Key(KeyCode::Hid(HidKeyCode::B)),
-            )
-            .ok();
-        morse
-            .actions
-            .insert(
-                MorsePattern::from_u16(0b1_1010),
-                Action::Key(KeyCode::Hid(HidKeyCode::C)),
-            )
-            .ok();
+        for (pattern, k) in [
+            (0b1_01, HidKeyCode::A),
+            (0b1_1000, HidKeyCode::B),
+            (0b1_1010, HidKeyCode::C),
+        ] {
+            patterns.actions.insert(MorsePattern::from_u16(pattern), key(k)).ok();
+        }
 
-        // Serialization
-        let mut buffer = [0u8; 64];
-        let storage_data = StorageValue::Morse(morse.clone());
-        let serialized_size = Value::serialize_into(&storage_data, &mut buffer).unwrap();
-
-        // Deserialization
-        let deserialized_data = StorageValue::deserialize_from(&buffer[..serialized_size]).unwrap();
-
-        // Validation
-        match deserialized_data {
-            (StorageValue::Morse(deserialized_morse), _) => {
-                // actions
-                assert_eq!(deserialized_morse.actions.len(), morse.actions.len());
-                for (original, deserialized) in morse.actions.iter().zip(deserialized_morse.actions.iter()) {
-                    assert_eq!(original, deserialized);
-                }
-                // profile
-                assert_eq!(deserialized_morse.profile, morse.profile);
-            }
-            _ => panic!("Expected MorseData"),
+        for morse in [vial, partial, patterns] {
+            let mut buffer = [0u8; 64];
+            let size = Value::serialize_into(&StorageValue::Morse(morse.clone()), &mut buffer).unwrap();
+            let StorageValue::Morse(decoded) = StorageValue::deserialize_from(&buffer[..size]).unwrap().0 else {
+                panic!("decoded as another variant");
+            };
+            assert_eq!(decoded.actions, morse.actions);
+            assert_eq!(decoded.profile, morse.profile);
         }
     }
 }

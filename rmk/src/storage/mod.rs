@@ -5,7 +5,6 @@ use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::Duration;
 use embedded_storage::nor_flash::NorFlash;
 use embedded_storage_async::nor_flash::NorFlash as AsyncNorFlash;
 use rmk_types::connection::ConnectionType;
@@ -326,17 +325,7 @@ pub async fn new_storage_without_keymap<F: AsyncNorFlash>(
     flash: F,
     storage_config: StorageConfig,
 ) -> Storage<F, 0, 0, 0, 0> {
-    Storage::<F, 0, 0, 0, 0>::new(
-        flash,
-        #[cfg(feature = "host")]
-        &[],
-        #[cfg(feature = "host")]
-        &None,
-        &storage_config,
-        #[cfg(feature = "host")]
-        &config::BehaviorConfig::default(),
-    )
-    .await
+    Storage::<F, 0, 0, 0, 0>::new(flash, &storage_config).await
 }
 
 /// The FNV-1a offset basis, the seed [`SCHEMA_HASH`] folds its byte runs into.
@@ -382,6 +371,8 @@ pub struct Storage<
         Cache<CalculatedPageStates, ArrayPagePointers<32>, ArrayKeyPointers<StorageKey, 32>, StorageKey>,
     >,
     pub(crate) buffer: [u8; get_buffer_size()],
+    #[cfg(feature = "host")]
+    pub(crate) clear_layout: bool,
 }
 
 impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
@@ -405,13 +396,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         }
     }
 
-    pub async fn new(
-        flash: F,
-        #[cfg(feature = "host")] keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
-        #[cfg(feature = "host")] encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
-        storage_config: &StorageConfig,
-        #[cfg(feature = "host")] behavior_config: &config::BehaviorConfig,
-    ) -> Self {
+    pub async fn new(flash: F, storage_config: &StorageConfig) -> Self {
         assert!(
             storage_config.num_sectors >= 2,
             "Number of used sector for storage must larger than 1"
@@ -455,6 +440,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         let mut storage = Self {
             flash: MapStorage::new(flash, MapConfig::new(storage_range.clone()), cache()),
             buffer: [0; get_buffer_size()],
+            #[cfg(feature = "host")]
+            clear_layout: false,
         };
 
         let stored = storage.fetch(StorageKey::StorageConfig).await;
@@ -468,41 +455,24 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             let _ = raw.erase(storage_range.start, storage_range.end).await;
             storage.flash = MapStorage::new(raw, MapConfig::new(storage_range), cache());
             let _ = storage.put(StorageItem::StorageConfig(SCHEMA_HASH)).await;
-        } else if storage_config.clear_layout {
-            // The compiled-in layout wins this boot. Pairings, connection type and user slots
-            // are left alone.
-            debug!("`clear_layout` is set, rewriting the items the compiled-in layout owns.");
+            // The erase already handed the compiled-in layout the win: reads miss and the RAM
+            // defaults stand, so there is nothing for `clear_layout` to overwrite.
+        } else {
             #[cfg(feature = "host")]
-            storage.write_layout(keymap, encoder_map, behavior_config).await;
+            {
+                storage.clear_layout = storage_config.clear_layout;
+            }
         }
 
         storage
     }
 
-    pub(crate) async fn read_behavior_config(
-        &mut self,
-        behavior_config: &mut config::BehaviorConfig,
-    ) -> Result<(), ()> {
-        if let Some(StorageValue::BehaviorConfig(c)) = self.fetch(StorageKey::BehaviorConfig).await? {
-            behavior_config.morse.prior_idle_time = Duration::from_millis(c.prior_idle_time as u64);
-            behavior_config.morse.default_profile = c.morse_default_profile;
-
-            behavior_config.combo.timeout = Duration::from_millis(c.combo_timeout as u64);
-            behavior_config.one_shot.timeout = Duration::from_millis(c.one_shot_timeout as u64);
-            behavior_config.tap.tap_interval = c.tap_interval;
-            behavior_config.tap.tap_capslock_interval = c.tap_capslock_interval;
-        }
-
-        Ok(())
-    }
-
     /// Overwrite every item the layout owns with the compiled-in defaults, so a value a host
     /// wrote earlier stops shadowing what was flashed. Only `clear_layout` reaches here.
     #[cfg(feature = "host")]
-    async fn write_layout(
+    pub(crate) async fn write_layout(
         &mut self,
-        keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
-        encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
+        data: &crate::keymap::KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER>,
         behavior: &config::BehaviorConfig,
     ) {
         let mut put = async |item| {
@@ -515,7 +485,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         put(StorageItem::LayoutOption(0)).await;
         put(StorageItem::MacroData(behavior.keyboard_macros.macro_sequences)).await;
 
-        for (layer, layer_data) in keymap.iter().enumerate() {
+        for (layer, layer_data) in data.keymap.iter().enumerate() {
             for (row, row_data) in layer_data.iter().enumerate() {
                 for (col, action) in row_data.iter().enumerate() {
                     put(StorageItem::Keymap {
@@ -528,16 +498,16 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 }
             }
         }
-        if let Some(encoder_map) = encoder_map {
-            for (layer, layer_data) in encoder_map.iter().enumerate() {
-                for (idx, action) in layer_data.iter().enumerate() {
-                    put(StorageItem::Encoder {
-                        layer: layer as u8,
-                        idx: idx as u8,
-                        action: *action,
-                    })
-                    .await;
-                }
+        // `NUM_ENCODER == 0` leaves every inner array empty, so a keyboard without encoders
+        // writes nothing here.
+        for (layer, layer_data) in data.encoder_map.iter().enumerate() {
+            for (idx, action) in layer_data.iter().enumerate() {
+                put(StorageItem::Encoder {
+                    layer: layer as u8,
+                    idx: idx as u8,
+                    action: *action,
+                })
+                .await;
             }
         }
         // An empty slot is written as an empty config, so a combo the user added over the host
@@ -647,7 +617,6 @@ pub(crate) async fn drain_flash_channel() {
 mod tests {
     use core::future::Future;
     use core::pin::pin;
-    use core::sync::atomic::{AtomicBool, Ordering};
     use core::task::{Context, Poll, Waker};
 
     use embassy_futures::select::{Either, select};
@@ -658,94 +627,9 @@ mod tests {
     use crate::config::{BehaviorConfig as RuntimeBehaviorConfig, StorageConfig as RuntimeStorageConfig};
     use crate::test_support::test_block_on as block_on;
 
-    /// Makes every `TestFlash::write` fail while set.
-    static FAIL_WRITES: AtomicBool = AtomicBool::new(false);
-
-    #[derive(Debug, Clone, Copy)]
-    struct TestFlashError;
-
-    impl embedded_storage_async::nor_flash::NorFlashError for TestFlashError {
-        fn kind(&self) -> embedded_storage_async::nor_flash::NorFlashErrorKind {
-            embedded_storage_async::nor_flash::NorFlashErrorKind::Other
-        }
-    }
-
     /// 16 KB of byte-writable flash in 4 KB sectors, the geometry `STORAGE_RANGE` is cut from.
-    struct TestFlash {
-        bytes: [u8; 16_384],
-    }
-
-    impl TestFlash {
-        fn new() -> Self {
-            Self { bytes: [0xFF; 16_384] }
-        }
-    }
-
-    impl embedded_storage::nor_flash::ErrorType for TestFlash {
-        type Error = TestFlashError;
-    }
-
-    impl embedded_storage::nor_flash::ReadNorFlash for TestFlash {
-        const READ_SIZE: usize = 1;
-
-        fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-            let start = offset as usize;
-            let end = start + bytes.len();
-            bytes.copy_from_slice(&self.bytes[start..end]);
-            Ok(())
-        }
-
-        fn capacity(&self) -> usize {
-            self.bytes.len()
-        }
-    }
-
-    impl embedded_storage::nor_flash::NorFlash for TestFlash {
-        const WRITE_SIZE: usize = 1;
-        const ERASE_SIZE: usize = 4_096;
-
-        fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-            self.bytes[from as usize..to as usize].fill(0xFF);
-            Ok(())
-        }
-
-        fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-            if FAIL_WRITES.load(Ordering::Relaxed) {
-                return Err(TestFlashError);
-            }
-            let start = offset as usize;
-            let end = start + bytes.len();
-            for (dst, src) in self.bytes[start..end].iter_mut().zip(bytes.iter()) {
-                *dst &= *src;
-            }
-            Ok(())
-        }
-    }
-
-    impl embedded_storage_async::nor_flash::ReadNorFlash for TestFlash {
-        const READ_SIZE: usize = 1;
-
-        async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-            embedded_storage::nor_flash::ReadNorFlash::read(self, offset, bytes)
-        }
-
-        fn capacity(&self) -> usize {
-            self.bytes.len()
-        }
-    }
-
-    impl embedded_storage_async::nor_flash::NorFlash for TestFlash {
-        const WRITE_SIZE: usize = 1;
-        const ERASE_SIZE: usize = 4_096;
-
-        async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-            embedded_storage::nor_flash::NorFlash::erase(self, from, to)
-        }
-
-        async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-            embedded_storage::nor_flash::NorFlash::write(self, offset, bytes)
-        }
-    }
+    type Part = crate::test_support::InMemoryFlash<16_384, 4_096, 1>;
+    type TestFlash = BlockingAsync<Part>;
 
     // The primitive tests below poll by hand: `test_block_on` re-polls with a noop waker
     // every step, so it would also pass a primitive that loses wake-ups.
@@ -827,33 +711,16 @@ mod tests {
         assert!(matches!(write.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
     }
 
-    // Boxed: `TestFlash` is 16 KB by value and the `new` future copies it several times.
+    // Boxed: the flash part is 16 KB by value and the `new` future copies it several times.
     async fn new_storage(flash: TestFlash) -> Storage<TestFlash, 1, 1, 1, 0> {
-        #[cfg(feature = "host")]
-        return new_storage_with_keymap(flash, [[[KeyAction::No; 1]; 1]; 1], &RuntimeStorageConfig::default()).await;
-        #[cfg(not(feature = "host"))]
-        Box::pin(Storage::<TestFlash, 1, 1, 1, 0>::new(
-            flash,
-            &RuntimeStorageConfig::default(),
-        ))
-        .await
+        new_storage_configured(flash, &RuntimeStorageConfig::default()).await
     }
 
-    #[cfg(feature = "host")]
-    async fn new_storage_with_keymap(
+    async fn new_storage_configured(
         flash: TestFlash,
-        keymap: [[[KeyAction; 1]; 1]; 1],
         storage_config: &RuntimeStorageConfig,
     ) -> Storage<TestFlash, 1, 1, 1, 0> {
-        let encoder_map: Option<&mut [[EncoderAction; 0]; 1]> = None;
-        Box::pin(Storage::<TestFlash, 1, 1, 1, 0>::new(
-            flash,
-            &keymap,
-            &encoder_map,
-            storage_config,
-            &RuntimeBehaviorConfig::default(),
-        ))
-        .await
+        Box::pin(Storage::<TestFlash, 1, 1, 1, 0>::new(flash, storage_config)).await
     }
 
     /// A config item written by some other firmware.
@@ -863,8 +730,11 @@ mod tests {
 
     /// A flash holding `items`, written by an uncached map so `Storage::new` boots over them.
     async fn seeded(items: &[(StorageKey, StorageValue)]) -> TestFlash {
-        let mut map =
-            MapStorage::<StorageKey, _, _>::new(TestFlash::new(), MapConfig::new(STORAGE_RANGE), Cache::new_uncached());
+        let mut map = MapStorage::<StorageKey, _, _>::new(
+            async_flash_wrapper(Part::new()),
+            MapConfig::new(STORAGE_RANGE),
+            Cache::new_uncached(),
+        );
         let mut buffer = [0u8; 256];
         for (key, data) in items {
             map.store_item(&mut buffer, key, data).await.unwrap();
@@ -872,14 +742,14 @@ mod tests {
         map.destroy().0
     }
 
-    /// Run `body` against a live storage task over a fresh flash.
-    fn with_storage_task<T>(body: impl Future<Output = T>) -> T {
+    /// Run `body` against a live storage task over `part`. A clone is enough:
+    /// every clone shares the same bytes.
+    fn with_storage_task<T>(part: Part, body: impl Future<Output = T>) -> T {
         use crate::core_traits::Runnable;
 
         crate::test_support::clear_flash_channel();
-        FAIL_WRITES.store(false, Ordering::Relaxed);
         block_on(async {
-            let mut storage = new_storage(TestFlash::new()).await;
+            let mut storage = new_storage(async_flash_wrapper(part)).await;
             match select(storage.run(), body).await {
                 Either::First(never) => never,
                 Either::Second(out) => out,
@@ -889,7 +759,7 @@ mod tests {
 
     #[test]
     fn read_sees_write_queued_before_it() {
-        with_storage_task(async {
+        with_storage_task(Part::new(), async {
             store_unchecked(StorageItem::ConnectionType(ConnectionType::Usb)).await;
             assert!(matches!(
                 read(StorageKey::ConnectionType).await,
@@ -905,7 +775,7 @@ mod tests {
 
     #[test]
     fn user_data_round_trips_through_its_slot() {
-        with_storage_task(async {
+        with_storage_task(Part::new(), async {
             assert_eq!(read_user_data(3).await, None, "an untouched slot reads back empty");
 
             store_user_data(3, &[0xAA, 0x55]).await.unwrap();
@@ -926,11 +796,12 @@ mod tests {
 
     #[test]
     fn store_reports_its_own_failure() {
-        with_storage_task(async {
-            FAIL_WRITES.store(true, Ordering::Relaxed);
+        let part = Part::new();
+        with_storage_task(part.clone(), async {
+            part.fail_writes(true);
             assert!(store(StorageItem::ConnectionType(ConnectionType::Usb)).await.is_err());
             // A failed write is not sticky: the next one answers for itself.
-            FAIL_WRITES.store(false, Ordering::Relaxed);
+            part.fail_writes(false);
             assert!(store(StorageItem::ConnectionType(ConnectionType::Usb)).await.is_ok());
             assert!(read(StorageKey::ConnectionType).await.is_ok());
         });
@@ -1009,16 +880,14 @@ mod tests {
         use rmk_types::action::Action;
         use rmk_types::keycode::{HidKeyCode, KeyCode};
 
-        const KEY: StorageKey = StorageKey::Keymap {
-            layer: 0,
-            row: 0,
-            col: 0,
-        };
+        use crate::keymap::KeymapData;
+
         let a = KeyAction::Single(Action::Key(KeyCode::Hid(HidKeyCode::A)));
         let b = KeyAction::Single(Action::Key(KeyCode::Hid(HidKeyCode::B)));
+        let mut behavior = RuntimeBehaviorConfig::default();
 
         block_on(async {
-            let mut storage = new_storage(TestFlash::new()).await;
+            let mut storage = new_storage(async_flash_wrapper(Part::new())).await;
             storage
                 .put(StorageItem::Keymap {
                     layer: 0,
@@ -1033,31 +902,26 @@ mod tests {
                 .await
                 .unwrap();
 
+            // A reboot into a firmware compiled with the other keymap: the stored edit still wins.
             let (flash, _) = storage.flash.destroy();
             let mut storage = new_storage(flash).await;
-            assert!(matches!(
-                storage.fetch(KEY).await,
-                Ok(Some(StorageValue::KeyAction(action))) if action == a
-            ));
+            let mut data = KeymapData::new([[[b]]]);
+            storage.read_keymap(&mut data, &mut behavior).await.unwrap();
+            assert_eq!(data.keymap[0][0][0], a);
 
-            // A firmware compiled with another keymap still does not shadow the edit.
-            let (flash, _) = storage.flash.destroy();
-            let mut storage = new_storage_with_keymap(flash, [[[b]]], &RuntimeStorageConfig::default()).await;
-            assert!(matches!(
-                storage.fetch(KEY).await,
-                Ok(Some(StorageValue::KeyAction(action))) if action == a
-            ));
-
+            // `clear_layout` hands the compiled-in layout the win, and keeps the pairing.
             let clear_layout = RuntimeStorageConfig {
                 clear_layout: true,
                 ..RuntimeStorageConfig::default()
             };
             let (flash, _) = storage.flash.destroy();
-            let mut storage = new_storage_with_keymap(flash, [[[b]]], &clear_layout).await;
-            assert!(matches!(
-                storage.fetch(KEY).await,
-                Ok(Some(StorageValue::KeyAction(action))) if action == b
-            ));
+            let mut storage = new_storage_configured(flash, &clear_layout).await;
+            assert!(storage.clear_layout, "a matching schema arms the layout rewrite");
+            storage.write_layout(&KeymapData::new([[[b]]]), &behavior).await;
+
+            let mut data = KeymapData::new([[[a]]]);
+            storage.read_keymap(&mut data, &mut behavior).await.unwrap();
+            assert_eq!(data.keymap[0][0][0], b);
             assert!(matches!(
                 storage.fetch(StorageKey::ConnectionType).await,
                 Ok(Some(StorageValue::ConnectionType(ConnectionType::Ble)))

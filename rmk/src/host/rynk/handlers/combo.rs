@@ -60,7 +60,7 @@ impl HandleBulk<SetComboBulk> for RynkService<'_> {
             self.ctx
                 .set_combo(idx as u8, config)
                 .await
-                .map_err(|()| RynkError::StorageFault)?;
+                .or(Err(RynkError::StorageFault))?;
         }
         msg.encode_response(&())
     }

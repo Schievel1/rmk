@@ -23,7 +23,6 @@ impl Handle<SetMacro> for RynkService<'_> {
         self.ctx
             .write_macro_buffer(r.offset as usize, &r.data.data)
             .await
-            .map_err(|()| RynkError::StorageFault)?;
-        Ok(())
+            .or(Err(RynkError::StorageFault))
     }
 }
