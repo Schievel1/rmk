@@ -61,7 +61,7 @@ matrix_type = "normal"
 # Default diode direction is col2row; set `row2col = true` if needed.
 # row2col = true
 row_pins = ["PIN_6", "PIN_7"]
-col_pins = ["PIN_19", "PIN_20"]
+col_pins = ["PIN_19", "PIN_16"]
 
 [[split.peripheral]]
 rows = 2
