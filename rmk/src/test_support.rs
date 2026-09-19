@@ -41,7 +41,7 @@ pub async fn drain_flash_channel() {
         use crate::storage::{FLASH_CHANNEL, FlashOperationMessage, REPLY};
         loop {
             match FLASH_CHANNEL.receive().await {
-                FlashOperationMessage::Read(_, t) | FlashOperationMessage::Sync(t) => REPLY.signal((t, Ok(None))),
+                FlashOperationMessage::Read(_, t) | FlashOperationMessage::Flush(t) => REPLY.signal((t, Ok(None))),
                 _ => {}
             }
         }
@@ -51,8 +51,8 @@ pub async fn drain_flash_channel() {
 }
 
 #[cfg(feature = "storage")]
-pub async fn sync_storage() -> bool {
-    crate::storage::sync().await
+pub async fn flush_storage() -> bool {
+    crate::storage::flush().await
 }
 
 const STEP: Duration = Duration::from_micros(100);

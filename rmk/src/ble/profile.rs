@@ -349,7 +349,7 @@ where
                         }
                     }
                     #[cfg(feature = "storage")]
-                    crate::storage::sync().await;
+                    crate::storage::flush().await;
                     info!("Update profile done");
                     break;
                 }

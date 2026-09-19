@@ -238,7 +238,7 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
                             0, true, new_addr,
                         )))
                         .await;
-                        if crate::storage::sync().await {
+                        if crate::storage::flush().await {
                             central_addr = Some(new_addr);
                         }
                     }

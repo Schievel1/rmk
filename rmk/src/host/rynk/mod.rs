@@ -46,8 +46,8 @@ impl<'a> RynkService<'a> {
         }
     }
 
-    /// Whether `cmd` changes state that storage persists.
-    fn persists(cmd: Cmd) -> bool {
+    /// Whether `cmd` needs a storage write to persist its effect.
+    fn needs_storage_write(cmd: Cmd) -> bool {
         matches!(
             cmd,
             Cmd::SetKeyAction
@@ -71,15 +71,15 @@ impl<'a> RynkService<'a> {
             // Deleting a bond opens a re-pair hijack window; BLE-only command.
             #[cfg(feature = "_ble")]
             Cmd::ClearBleProfile => true,
-            _ => Self::persists(cmd) && self.lock_config.write_requires_unlock,
+            _ => Self::needs_storage_write(cmd) && self.lock_config.write_requires_unlock,
         }
     }
 
     /// Serve one inbound message: on success the reply frame replaces the
     /// payload in place; on error the caller answers with the error envelope.
     ///
-    /// A command that persists state is answered only once its writes have
-    /// landed, so handlers never have to remember to wait for storage.
+    /// A command that needs a storage write is answered only once that write
+    /// has landed, so handlers never have to remember to wait for storage.
     async fn dispatch(&self, locker: &HostLock<'_>, msg: &mut RynkMessage<'_>) -> Result<(), RynkError> {
         let cmd = msg.header().cmd;
 
@@ -89,7 +89,7 @@ impl<'a> RynkService<'a> {
 
         let served = self.serve_cmd(cmd, locker, msg).await;
         #[cfg(feature = "storage")]
-        if served.is_ok() && Self::persists(cmd) && !crate::storage::sync().await {
+        if served.is_ok() && Self::needs_storage_write(cmd) && !crate::storage::flush().await {
             return Err(RynkError::StorageFault);
         }
         served

@@ -514,7 +514,7 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
             #[cfg(feature = "storage")]
             SimStep::WaitStorage => {
                 let waiting = format!("no storage write within {TIMEOUT_SECS}s");
-                let written = with_timeout(rmk::test_support::sync_storage(), &waiting).await;
+                let written = with_timeout(rmk::test_support::flush_storage(), &waiting).await;
                 assert!(written, "storage write failed");
             }
             #[cfg(feature = "passkey_entry")]

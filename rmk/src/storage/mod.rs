@@ -38,19 +38,19 @@ use crate::split::ble::PeerAddress;
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub(crate) enum FlashOperationMessage {
-    /// Fire-and-forget. The runner logs a failure and latches it for the next `Sync`.
+    /// Fire-and-forget. The runner logs a failure and latches it for the next `Flush`.
     Store(StorageItem),
     /// Answered once on `REPLY` after every earlier message (FIFO).
     Read(StorageKey, u8),
-    /// Barrier, like `fsync`: answered `Err` if any `Store` failed since the previous `Sync`.
-    Sync(u8),
+    /// Barrier, like `fsync`: answered `Err` if any `Store` failed since the previous `Flush`.
+    Flush(u8),
     /// `erase_all` + reboot; never answered.
     Reset,
 }
 
 pub(crate) type Reply = Result<Option<StorageData>, ()>;
 
-// Firmware code goes through `store`/`read`/`sync`/`reset`; `test_support` stands in for the task.
+// Firmware code goes through `store`/`read`/`flush`/`reset`; `test_support` stands in for the task.
 pub(crate) static FLASH_CHANNEL: Channel<crate::RawMutex, FlashOperationMessage, { crate::FLASH_CHANNEL_SIZE }> =
     Channel::new();
 /// One ticketed request in flight: the lock is the turn, its value is the ticket counter.
@@ -82,8 +82,8 @@ pub(crate) async fn read(key: StorageKey) -> Reply {
 }
 
 /// `true` once every store queued before this call has landed.
-pub(crate) async fn sync() -> bool {
-    request(FlashOperationMessage::Sync).await.is_ok()
+pub(crate) async fn flush() -> bool {
+    request(FlashOperationMessage::Flush).await.is_ok()
 }
 
 /// Erase everything and reboot.
@@ -554,7 +554,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     continue;
                 }
                 FlashOperationMessage::Read(key, ticket) => (ticket, self.fetch(key).await),
-                FlashOperationMessage::Sync(ticket) => (
+                FlashOperationMessage::Flush(ticket) => (
                     ticket,
                     if core::mem::take(&mut failed) {
                         Err(())
@@ -724,7 +724,7 @@ mod tests {
     // waker every step, so it would also pass a primitive that loses wake-ups.
     fn take_ticket() -> u8 {
         match FLASH_CHANNEL.try_receive() {
-            Ok(FlashOperationMessage::Read(_, t)) | Ok(FlashOperationMessage::Sync(t)) => t,
+            Ok(FlashOperationMessage::Read(_, t)) | Ok(FlashOperationMessage::Flush(t)) => t,
             other => panic!("expected a ticketed request, got {other:?}"),
         }
     }
@@ -760,7 +760,7 @@ mod tests {
         REPLY.reset();
 
         let mut first = pin!(read(StorageKey::StorageConfig));
-        let mut second = pin!(sync());
+        let mut second = pin!(flush());
         assert!(first.as_mut().poll(&mut cx).is_pending());
         assert!(second.as_mut().poll(&mut cx).is_pending());
         // Only the turn holder's message is in flight.
@@ -772,13 +772,13 @@ mod tests {
         assert!(second.as_mut().poll(&mut cx).is_pending());
         assert!(matches!(
             FLASH_CHANNEL.try_receive(),
-            Ok(FlashOperationMessage::Sync(_))
+            Ok(FlashOperationMessage::Flush(_))
         ));
     }
 
     #[cfg(all(feature = "_ble", feature = "split"))]
     #[test]
-    fn peer_address_write_waits_for_its_own_sync() {
+    fn peer_address_write_waits_for_its_own_flush() {
         let mut cx = Context::from_waker(Waker::noop());
         FLASH_CHANNEL.clear();
         REPLY.reset();
@@ -788,8 +788,8 @@ mod tests {
 
         let mut write = pin!(store(StorageItem::PeerAddress(PeerAddress::new(0, true, [1; 6]))));
         assert!(write.as_mut().poll(&mut cx).is_ready());
-        let mut synced = pin!(sync());
-        assert!(synced.as_mut().poll(&mut cx).is_pending());
+        let mut flushed = pin!(flush());
+        assert!(flushed.as_mut().poll(&mut cx).is_pending());
 
         // The storage task sees the older write, the peer address, then the barrier.
         assert!(matches!(
@@ -800,10 +800,10 @@ mod tests {
             FLASH_CHANNEL.try_receive(),
             Ok(FlashOperationMessage::Store(StorageItem::PeerAddress(_)))
         ));
-        assert!(synced.as_mut().poll(&mut cx).is_pending());
+        assert!(flushed.as_mut().poll(&mut cx).is_pending());
         let ticket = take_ticket();
         REPLY.signal((ticket, Ok(None)));
-        assert!(matches!(synced.as_mut().poll(&mut cx), Poll::Ready(true)));
+        assert!(matches!(flushed.as_mut().poll(&mut cx), Poll::Ready(true)));
     }
 
     type Flash = TestFlash<16_384, 4_096, 1>;
@@ -883,13 +883,13 @@ mod tests {
     }
 
     #[test]
-    fn sync_reports_a_failed_store_once() {
+    fn flush_reports_a_failed_store_once() {
         with_storage_task(async {
             FAIL_WRITES.store(true, Ordering::Relaxed);
             store(StorageItem::ConnectionType(ConnectionType::Usb)).await;
-            assert!(!sync().await);
+            assert!(!flush().await);
             // The latch is cleared by the report; reads keep working.
-            assert!(sync().await);
+            assert!(flush().await);
             assert!(read(StorageKey::ConnectionType).await.is_ok());
         });
     }
